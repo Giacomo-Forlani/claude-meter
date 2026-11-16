@@ -183,6 +183,17 @@ test('fallback to first user message: array content, tool results skipped', asyn
     assertEqual((await listOne(env, 's')).title, 'from array', 'title');
 });
 
+test('fallback skips slash-command wrappers', async () => {
+    const env = makeEnv();
+    addConv(env, 'p', 's', [
+        L({type: 'user', message: {content: '<command-name>/clear</command-name>\n<command-message>clear</command-message>'}}),
+        L({type: 'user', message: {content: '<local-command-stdout></local-command-stdout>'}}),
+        L({type: 'user', message: {content: [{type: 'text', text: '<local-command-caveat>x</local-command-caveat>'}]}}),
+        L({type: 'user', message: {content: '<b>vero</b> messaggio'}}),
+    ]);
+    assertEqual((await listOne(env, 's')).title, '<b>vero</b> messaggio', 'title');
+});
+
 test('fallback truncates to ~80 chars with ellipsis', async () => {
     const env = makeEnv();
     addConv(env, 'p', 's', [L({type: 'user', message: {content: 'x'.repeat(200)}})]);
