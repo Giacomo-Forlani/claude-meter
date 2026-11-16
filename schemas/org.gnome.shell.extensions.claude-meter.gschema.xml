@@ -35,5 +35,14 @@
       <summary>Soglia critica</summary>
       <description>Percentuale di utilizzo oltre la quale l'indicatore diventa rosso.</description>
     </key>
+    <key name="prefs-start-page" type="s">
+      <choices>
+        <choice value="general"/>
+        <choice value="sessions"/>
+      </choices>
+      <default>'general'</default>
+      <summary>Pagina iniziale delle preferenze</summary>
+      <description>Pagina da mostrare alla prossima apertura delle preferenze ('general' | 'sessions'). Viene riportata a 'general' dopo l'uso.</description>
+    </key>
   </schema>
 </schemalist>
