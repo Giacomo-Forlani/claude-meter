@@ -65,22 +65,13 @@
     margin-top: 4px;
 }
 
-/* Progress bars (colors per theme variant). */
+/* Progress bars: St.DrawingArea, colors read from code (see _paintBar);
+ * track and traffic colors per theme variant. */
 .claude-meter-bar {
-    border-radius: 3px;
     min-height: 6px;
     margin-top: 6px;
     margin-bottom: 2px;
-}
-
-.claude-meter-fill {
-    border-radius: 3px;
-    min-height: 6px;
-}
-
-/* Accent mode: always the system accent color. */
-.claude-meter-mode-accent .claude-meter-fill {
-    background-color: -st-accent-color;
+    -claude-meter-bar-color: -st-accent-color;
 }
 
 /* 7 days chart. */

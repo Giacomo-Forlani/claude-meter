@@ -14,7 +14,7 @@ import {SessionMonitor} from './lib/sessionMonitor.js';
 // The usage endpoint rate-limits aggressively (HTTP 429): plan requests are
 // scheduled separately from the local token scan.
 // Menu open refreshes the plan only if the last good value is older than this.
-const PLAN_STALE_ON_OPEN_MS = 3 * 60 * 1000;
+const PLAN_STALE_ON_OPEN_MS = 60 * 1000;
 // Menu open never retries the plan more often than this (e.g. while offline).
 const PLAN_MIN_SPACING_MS = 60 * 1000;
 // Timer ticks are coarse: accept a plan tick slightly early.
@@ -25,6 +25,12 @@ const RATE_LIMIT_MAX_MS = 30 * 60 * 1000;
 // Persist parser offsets at least this often even without new records.
 const FORCED_SAVE_MS = 10 * 60 * 1000;
 const RESUME_DELAY_S = 5;
+// Fetch the plan this long after a window's reset time (the server needs a
+// moment to roll the window over).
+const RESET_FETCH_DELAY_S = 15;
+// Pending refreshes collapse into one: the reason that fetches the plan most
+// eagerly wins.
+const REASON_PRIORITY = ['reset', 'startup', 'resume', 'tick', 'open'];
 // Claude Code sessions (crabs): file changes are picked up right away; the
 // poll catches processes that died without removing their file.
 const SESSION_POLL_S = 5;
@@ -53,7 +59,8 @@ export default class ClaudeMeterExtension extends Extension {
         this._data = new DataManager();
 
         this._refreshing = null;
-        this._pendingRefresh = false;
+        this._pendingReason = null;
+        this._planUsage = null;
         this._lastPlanAttempt = 0;
         this._lastPlanSuccess = 0;
         this._planBackoffUntil = 0;
@@ -100,6 +107,7 @@ export default class ClaudeMeterExtension extends Extension {
 
         this._removeTimer();
         this._removeResumeSource();
+        this._removeResetSource();
         this._stopSessionWatch();
         if (this._crabModeId) {
             this._settings.disconnect(this._crabModeId);
@@ -223,7 +231,9 @@ export default class ClaudeMeterExtension extends Extension {
         this._rateLimitHits = plan.rateLimitHits;
         if (plan.usage) {
             this._lastPlanSuccess = plan.usage.fetchedAt.getTime();
+            this._planUsage = plan.usage;
             this._indicator.setPlanUsage(plan.usage, null);
+            this._scheduleResetFetch();
         }
         if (Date.now() < this._planBackoffUntil) {
             this._indicator.setPlanUsage(null, PLAN_ERRORS['rate-limited']);
@@ -255,6 +265,46 @@ export default class ClaudeMeterExtension extends Extension {
         }
     }
 
+    /** Next plan fetch right after the earliest future window reset. */
+    _scheduleResetFetch() {
+        this._removeResetSource();
+        const now = Date.now();
+        const next = this._resetTimes()
+            .filter(t => t > now)
+            .reduce((min, t) => Math.min(min, t), Infinity);
+        if (!Number.isFinite(next))
+            return;
+        // Capped (timer drift, suspend): an early wake-up just reschedules.
+        const seconds = Math.min(3600, Math.ceil((next - now) / 1000) + RESET_FETCH_DELAY_S);
+        this._resetSourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, seconds, () => {
+            this._resetSourceId = 0;
+            if (this._planExpired(Date.now()))
+                this._refresh({reason: 'reset'});
+            else
+                this._scheduleResetFetch();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _removeResetSource() {
+        if (this._resetSourceId) {
+            GLib.source_remove(this._resetSourceId);
+            this._resetSourceId = 0;
+        }
+    }
+
+    _resetTimes() {
+        const usage = this._planUsage;
+        return [usage?.fiveHour, usage?.sevenDay]
+            .map(w => w?.resetsAt instanceof Date ? w.resetsAt.getTime() : null)
+            .filter(t => t !== null && Number.isFinite(t));
+    }
+
+    /** True when a shown window has passed its reset time (its value is outdated). */
+    _planExpired(now) {
+        return this._resetTimes().some(t => t <= now);
+    }
+
     _removeResumeSource() {
         if (this._resumeSourceId) {
             GLib.source_remove(this._resumeSourceId);
@@ -266,13 +316,17 @@ export default class ClaudeMeterExtension extends Extension {
      * Local tokens are always rescanned; the plan request depends on `reason`
      * (see _isPlanDue).
      * @param {object} opts
-     * @param {'startup'|'tick'|'open'|'resume'} opts.reason
+     * @param {'startup'|'tick'|'open'|'resume'|'reset'} opts.reason
      */
     _refresh({reason}) {
         if (!this._ready || !this._cancellable)
             return Promise.resolve();
         if (this._refreshing) {
-            this._pendingRefresh = true;
+            // Keep the most eager reason: a queued tick or reset must not
+            // degrade to 'open' and lose its plan fetch.
+            const pending = this._pendingReason;
+            if (!pending || REASON_PRIORITY.indexOf(reason) < REASON_PRIORITY.indexOf(pending))
+                this._pendingReason = reason;
             return this._refreshing;
         }
         this._refreshing = this._doRefresh(reason)
@@ -282,10 +336,10 @@ export default class ClaudeMeterExtension extends Extension {
             })
             .finally(() => {
                 this._refreshing = null;
-                if (this._pendingRefresh && this._cancellable) {
-                    this._pendingRefresh = false;
-                    this._refresh({reason: 'open'});
-                }
+                const pending = this._pendingReason;
+                this._pendingReason = null;
+                if (pending && this._cancellable)
+                    this._refresh({reason: pending});
             });
         return this._refreshing;
     }
@@ -305,15 +359,20 @@ export default class ClaudeMeterExtension extends Extension {
         const sinceAttempt = now - this._lastPlanAttempt;
         const sinceSuccess = now - this._lastPlanSuccess;
         const interval = Math.max(60, this._settings.get_uint('plan-refresh-interval')) * 1000;
+        // A window past its reset time shows "—": get the new value soon.
+        const expired = this._planExpired(now);
 
         switch (reason) {
+        case 'reset':
+            return expired && sinceAttempt >= PLAN_MIN_SPACING_MS;
         case 'startup':
             // Persisted values younger than one interval are good enough.
-            return sinceSuccess >= interval - PLAN_TICK_TOLERANCE_MS;
+            return expired || sinceSuccess >= interval - PLAN_TICK_TOLERANCE_MS;
         case 'open':
-            return sinceSuccess >= PLAN_STALE_ON_OPEN_MS && sinceAttempt >= PLAN_MIN_SPACING_MS;
+            return (expired || sinceSuccess >= PLAN_STALE_ON_OPEN_MS) &&
+                sinceAttempt >= PLAN_MIN_SPACING_MS;
         case 'resume':
-            return sinceSuccess >= PLAN_STALE_ON_OPEN_MS;
+            return expired || sinceSuccess >= PLAN_STALE_ON_OPEN_MS;
         case 'tick':
         default:
             return sinceAttempt >= interval - PLAN_TICK_TOLERANCE_MS;
@@ -334,6 +393,8 @@ export default class ClaudeMeterExtension extends Extension {
             this._rateLimitHits = 0;
             this._planBackoffUntil = 0;
             this._lastPlanSuccess = Date.now();
+            this._planUsage = usage;
+            this._scheduleResetFetch();
             this._indicator.setPlanUsage(usage, null);
             this._indicator.setPlanRetryAt(null);
             this._data.setPlan({usage, backoffUntil: 0, rateLimitHits: 0});
