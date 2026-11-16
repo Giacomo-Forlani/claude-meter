@@ -18,12 +18,15 @@ Monitors Claude usage from the GNOME top bar. Full spec: `plan.md` (Italian).
 ## File ownership
 | File | Owner |
 |---|---|
-| `metadata.json`, `extension.js`, `icons/`, `AGENTS.md` | orchestrator |
-| `lib/indicator.js`, `lib/format.js`, `lib/crabs.js`, `styles/*.css` | UI |
+| `metadata.json`, `extension.js`, `icons/`, `AGENTS.md`, `SPRITES.md` | orchestrator |
+| `lib/indicator.js`, `lib/format.js`, `lib/crabs.js`, `lib/sprites.js`, `styles/*.css` | UI |
 | `lib/sessionMonitor.js`, `tests/test-sessions.js` | Sessions |
 | `lib/tokenParser.js`, `tests/test-parser.js` | Token Parser |
 | `lib/usageManager.js`, `tests/test-usage.js` | Usage Manager |
 | `lib/dataManager.js`, `schemas/org.gnome.shell.extensions.claude-meter.gschema.xml`, `prefs.js`, `tests/test-data.js` | Data/Settings |
+
+## Crab sprites
+Animations are hand-written ASCII data in `lib/sprites.js`, compiled by `lib/crabs.js`. Format, fields and how to add/edit/remove one: see `SPRITES.md` (keep it in sync when changing the format).
 
 ## Interface contracts (do not change signatures)
 
@@ -86,7 +89,9 @@ export const ClaudeMeterIndicator = GObject.registerClass({
     destroy()
 });
 // Top bar: 5h / weekly usage rings (St.DrawingArea) + one pixel-art crab per session
-// (lib/crabs.js model, 8 fps timer only while a session is busy), all within
+// (sprites hand-written in lib/sprites.js: B body, b dark body, E eyes; grid = largest frame;
+// lib/crabs.js compiles them + behaviour model, 8 fps timer only while a session is busy
+// or the 'idle' animation has several frames), all within
 // `panel-max-width`; the icon is shown only when nothing else is visible.
 // Emits 'refresh-requested' when the menu is opened (no manual refresh button).
 // Menu = two PopupMenuSection "pages": main (plan + age) and details (tokens, 7-day chart, prefs);

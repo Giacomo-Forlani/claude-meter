@@ -3,7 +3,8 @@ import GLib from 'gi://GLib';
 import System from 'system';
 
 import {SessionMonitor, parseProcStart, parseSession} from '../lib/sessionMonitor.js';
-import {CrabFlock, crabPixels, colorFor, PALETTE, SPRITE_W, GRID_W, GRID_H} from '../lib/crabs.js';
+import {CrabFlock, compileAnimations, darken, SPRITES, colorFor, PALETTE, SPRITE_W, GRID_W, GRID_H}
+    from '../lib/crabs.js';
 
 let total = 0;
 let failures = 0;
@@ -103,14 +104,50 @@ async function testScan(tmp) {
 }
 
 function testCrabs() {
-    const {body, eyes} = crabPixels({});
-    const inside = [...body, ...eyes].every(([c, r]) => c >= 0 && c < GRID_W && r >= 0 && r < GRID_H);
-    check('sprite dentro la griglia', inside);
-    check('occhi aperti: 4 pixel', eyes.length === 4);
-    check('occhi chiusi: 2 pixel', crabPixels({eyesOpen: false}).eyes.length === 2);
-    const keys = new Set([...body, ...eyes].map(p => p.join(',')));
-    check('nessun pixel duplicato', keys.size === body.length + eyes.length);
-    check('gambe alzate in camminata', crabPixels({legs: 0}).body.length === body.length - 2);
+    check('griglia 15x11', GRID_W === 15 && GRID_H === 11, `${GRID_W}x${GRID_H}`);
+    check('animazione idle presente', Boolean(SPRITES.idle));
+    for (const [name, anim] of Object.entries(SPRITES)) {
+        anim.frames.forEach((s, i) => {
+            const all = [...s.body, ...s.dark, ...s.eyes];
+            const inside = all.every(([c, r]) => c >= 0 && c < GRID_W && r >= 0 && r < GRID_H);
+            check(`${name}[${i}] dentro la griglia e con occhi`, inside && s.eyes.length > 0 && s.body.length > 0);
+        });
+    }
+    check('occhi chiusi in idle: 2 pixel', SPRITES.idle.frames.every(f => f.eyes.length === 2));
+    check('every per frame', SPRITES.pause.every.length === SPRITES.pause.frames.length);
+    check('walk specchiato', SPRITES.walk.mirrored !== null &&
+        SPRITES.walk.mirrored[0].eyes.every(([c, r]) => SPRITES.walk.frames[0].eyes.some(([c2, r2]) => c2 === GRID_W - 1 - c && r2 === r)));
+
+    const small = compileAnimations({
+        idle: {frames: [['BbE'], ['.....', 'B...B']]},
+    });
+    check('griglia = frame più grande', small.width === 5 && small.height === 2);
+    check('frame piccolo centrato in basso',
+        JSON.stringify(small.animations.idle.frames[0]) === JSON.stringify({body: [[1, 1]], dark: [[2, 1]], eyes: [[3, 1]]}));
+    let threw = false;
+    try {
+        compileAnimations({idle: {frames: [['BX']]}});
+    } catch (e) {
+        threw = true;
+    }
+    check('carattere sconosciuto -> errore', threw);
+    threw = false;
+    try {
+        compileAnimations({walk: {frames: [['B']]}});
+    } catch (e) {
+        threw = true;
+    }
+    check('idle mancante -> errore', threw);
+    threw = false;
+    try {
+        compileAnimations({idle: {every: [1, 2], frames: [['B']]}});
+    } catch (e) {
+        threw = true;
+    }
+    check('every con lunghezza sbagliata -> errore', threw);
+    const timed = compileAnimations({idle: {every: [3, 1], frames: [['B'], ['E']]}}).animations.idle;
+    check('ciclo = somma di every', timed.cycle === 4 && timed.mirrored === null);
+    check('darken', darken('#ff8000', 0.5) === '#804000');
 
     check('colore stabile', colorFor('abc') === colorFor('abc') && PALETTE.includes(colorFor('abc')));
 
@@ -121,12 +158,18 @@ function testCrabs() {
     };
     const flock = new CrabFlock(rand);
     check('larghezza preferita 0 granchi', CrabFlock.preferredWidth(0) === 0);
-    check('larghezza preferita 3 granchi', CrabFlock.preferredWidth(3) === 72);
+    check('larghezza preferita 3 granchi', CrabFlock.preferredWidth(3) === 3 * (SPRITE_W + 2));
 
     flock.setWidth(60);
     flock.sync([{id: 'a', busy: false}, {id: 'b', busy: false}]);
-    check('idle non anima', flock.size === 2 && !flock.animating);
-    check('idle dim e occhi chiusi', flock.frames().every(f => f.dim && f.pose.eyesOpen === false));
+    check('idle animata -> timer attivo', flock.size === 2 && flock.animating === SPRITES.idle.frames.length > 1);
+    const sprite0 = flock.frames()[0].sprite;
+    let repaints = 0;
+    for (let i = 0; i < SPRITES.idle.cycle; i++)
+        repaints += Number(flock.step());
+    check('idle: ridisegna solo al cambio frame', repaints === SPRITES.idle.frames.length && flock.frames()[0].sprite === sprite0,
+        `${repaints}`);
+    check('idle dim con animazione idle', flock.frames().every(f => f.dim && f.animation === 'idle'));
 
     flock.sync([{id: 'a', busy: true}, {id: 'b', busy: false}]);
     check('busy anima', flock.animating);
@@ -147,7 +190,7 @@ function testCrabs() {
     check('granchio idle fermo', flock.frames().find(f => f.id === 'b').x === 60 - SPRITE_W);
 
     flock.sync([{id: 'b', busy: false}]);
-    check('sessione chiusa -> granchio rimosso', flock.size === 1 && !flock.animating);
+    check('sessione chiusa -> granchio rimosso', flock.size === 1 && flock.animating === SPRITES.idle.frames.length > 1);
 }
 
 async function main() {
