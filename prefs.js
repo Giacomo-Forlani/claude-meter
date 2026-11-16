@@ -178,13 +178,12 @@ class SessionsPage {
     }
 
     _addRow(group, session, projectSessions) {
-        const projectPath = session.projectPath ? tildify(session.projectPath) : '—';
         // Titles are arbitrary user text: never parse them as markup. Disable
         // markup before setting the text (construct-property order is not guaranteed).
-        const row = new Adw.ActionRow({subtitle_lines: 2});
+        const row = new Adw.ActionRow({subtitle_lines: 1});
         row.use_markup = false;
         row.title = session.title ?? 'Senza titolo';
-        row.subtitle = `${projectPath}\nUltima apertura ${formatDate(session.lastUsedAt)} · ` +
+        row.subtitle = `Ultima apertura ${formatDate(session.lastUsedAt)} · ` +
             `Creata ${formatDate(session.createdAt)}`;
 
         const button = new Gtk.Button({
