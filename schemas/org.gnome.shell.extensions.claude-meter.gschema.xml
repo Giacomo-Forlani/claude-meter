@@ -67,5 +67,14 @@
       <summary>Larghezza massima nella barra superiore</summary>
       <description>Larghezza massima in pixel di cerchi e granchi insieme.</description>
     </key>
+    <key name="prefs-start-page" type="s">
+      <choices>
+        <choice value="general"/>
+        <choice value="sessions"/>
+      </choices>
+      <default>'general'</default>
+      <summary>Pagina iniziale delle preferenze</summary>
+      <description>Pagina da mostrare alla prossima apertura delle preferenze ('general' | 'sessions'). Viene riportata a 'general' dopo l'uso.</description>
+    </key>
   </schema>
 </schemalist>

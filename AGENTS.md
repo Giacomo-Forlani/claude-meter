@@ -23,7 +23,7 @@ Monitors Claude usage from the GNOME top bar. Full spec: `plan.md` (Italian).
 | `lib/sessionMonitor.js`, `tests/test-sessions.js` | Sessions |
 | `lib/tokenParser.js`, `tests/test-parser.js` | Token Parser |
 | `lib/usageManager.js`, `tests/test-usage.js` | Usage Manager |
-| `lib/dataManager.js`, `schemas/org.gnome.shell.extensions.claude-meter.gschema.xml`, `prefs.js`, `tests/test-data.js` | Data/Settings |
+| `lib/dataManager.js`, `schemas/org.gnome.shell.extensions.claude-meter.gschema.xml`, `prefs.js`, `tests/test-data.js`, `lib/sessionStore.js`, `tests/test-session-store.js` | Data/Settings |
 
 ## Crab sprites
 Animations are hand-written ASCII data in `lib/sprites.js`, compiled by `lib/crabs.js`. Format, fields and how to add/edit/remove one: see `SPRITES.md` (keep it in sync when changing the format).
@@ -75,6 +75,24 @@ export class DataManager {
 }
 ```
 
+### lib/sessionStore.js
+```js
+export class SessionStore {
+    constructor(claudeDir = ~/.claude, procDir = '/proc')   // procDir is injectable for tests
+    async list(cancellable = null)            // -> Promise<Session[]>, most recently used first
+    async getDeletionTargets(session, cancellable = null) // -> Promise<Target[]>, only existing paths
+    async trash(session, cancellable = null)  // -> Promise<{ trashed: string[], failed: [{path, message}] }>
+                                              // throws Error with .code === 'active' (nothing trashed)
+    async _trashPath(path, cancellable)       // the only call to Gio trash_async; tests override it
+}
+// Session = { sessionId: string, title: string|null, projectPath: string|null,
+//             projectDir: string, file: string,
+//             createdAt: Date|null, lastUsedAt: Date|null, active: boolean }
+// Target  = { path: string, kind: 'conversation' | 'session-dir' | 'file-history'
+//                               | 'session-env' | 'todos' | 'project-dir' }
+```
+Pure module (Gio/GLib only). A conversation is a first-level `projects/<project>/<sessionId>.jsonl`. Title = last `custom-title`/`ai-title` record, else first real user message (slash-command wrappers skipped), else `null`. Active = `sessionId` listed in `~/.claude/sessions/<pid>.json` with a live `/proc/<pid>`, or file modified in the last 5 minutes. Linked data: `projects/<project>/<sessionId>/`, `file-history/<sessionId>/`, `session-env/<sessionId>/`, `todos/<sessionId>*`. When the project directory would be left empty or with only `memory/`, the single `project-dir` target replaces `conversation` and `session-dir`. Deletion is always a move to the system trash; `history.jsonl`, `shell-snapshots/`, `paste-cache/`, `telemetry/`, `jobs/`, `daemon/` are never touched. Tests must never call the real `trash_async`.
+
 ### lib/indicator.js
 ```js
 export const ClaudeMeterIndicator = GObject.registerClass({
@@ -96,6 +114,9 @@ export const ClaudeMeterIndicator = GObject.registerClass({
 // Emits 'refresh-requested' when the menu is opened (no manual refresh button).
 // Menu = two PopupMenuSection "pages": main (plan + age) and details (tokens, 7-day chart, prefs);
 // NavItem overrides activate() so switching page does not close the menu.
+// Only the 5-hour and 7-day bars are drawn: PlanUsage.scoped stays in the data contract but is not shown.
+// Main page item "Gestisci conversazioni": sets `prefs-start-page` to 'sessions', then opens the
+// preferences (or raises the window if already open: openPreferences() fails in that case).
 ```
 
 ### lib/sessionMonitor.js
@@ -116,9 +137,10 @@ Claude Code writes `~/.claude/sessions/<pid>.json` with `kind` ('interactive'|'b
 - `panel-show-five-hour`, `panel-show-seven-day` (b, default true) — top-bar rings
 - `crab-mode` (s, 'per-session' | 'max' | 'off', default 'per-session'), `crab-max` (u, default 3, 1..20)
 - `panel-max-width` (u, default 100, 40..400) px for rings + crabs; crabs beyond what fits (min 14 px apart) are dropped, busy ones first
+- `prefs-start-page` (s, 'general' | 'sessions', default 'general') — one-shot: page to show when the preferences open; `prefs.js` consumes it and resets it to 'general' (also while the window is already open)
 
 ## Verification
-- Pure modules (parser, usage, data) can be run outside the shell: `gjs -m tests/test-<name>.js`.
+- Pure modules (parser, usage, data, sessions, session-store) can be run outside the shell: `gjs -m tests/test-<name>.js`.
 - Shell-only modules (`lib/indicator.js`, `extension.js`) cannot be imported outside GNOME Shell: test them with `dev/nested.sh` (headless isolated shell: start / eval / shot / log / stop). `lib/format.js` must stay pure (no shell imports) so it can be tested with gjs.
 - Tests must use temp dirs/fixtures (`GLib.dir_make_tmp`), never write into `~/.claude` or `~/.local/share/claude-meter`. Test files print `PASS`/`FAIL` lines and exit non-zero on failure.
 - Schema: `glib-compile-schemas --strict --dry-run schemas/`.
