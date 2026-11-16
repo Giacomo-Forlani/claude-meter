@@ -19,7 +19,8 @@ Monitors Claude usage from the GNOME top bar. Full spec: `plan.md` (Italian).
 | File | Owner |
 |---|---|
 | `metadata.json`, `extension.js`, `icons/`, `AGENTS.md` | orchestrator |
-| `lib/indicator.js`, `lib/format.js`, `styles/*.css` | UI |
+| `lib/indicator.js`, `lib/format.js`, `lib/crabs.js`, `styles/*.css` | UI |
+| `lib/sessionMonitor.js`, `tests/test-sessions.js` | Sessions |
 | `lib/tokenParser.js`, `tests/test-parser.js` | Token Parser |
 | `lib/usageManager.js`, `tests/test-usage.js` | Usage Manager |
 | `lib/dataManager.js`, `schemas/org.gnome.shell.extensions.claude-meter.gschema.xml`, `prefs.js`, `tests/test-data.js` | Data/Settings |
@@ -81,19 +82,35 @@ export const ClaudeMeterIndicator = GObject.registerClass({
     setTokens(today /*{input,output,total}|null*/, error /*string|null*/)
     setHistory(history /*getHistory() result*/)
     setPlanRetryAt(date /*Date|null*/)  // next plan attempt after a 429
+    setSessions(sessions /*[{id, busy, startedAt}]*/)  // open Claude Code sessions → crabs
     destroy()
 });
+// Top bar: 5h / weekly usage rings (St.DrawingArea) + one pixel-art crab per session
+// (lib/crabs.js model, 8 fps timer only while a session is busy), all within
+// `panel-max-width`; the icon is shown only when nothing else is visible.
 // Emits 'refresh-requested' when the menu is opened (no manual refresh button).
 // Menu = two PopupMenuSection "pages": main (plan + age) and details (tokens, 7-day chart, prefs);
 // NavItem overrides activate() so switching page does not close the menu.
 ```
+
+### lib/sessionMonitor.js
+```js
+export class SessionMonitor {
+    constructor(sessionsDir = ~/.claude/sessions, procDir = '/proc')
+    async scan(cancellable = null) // -> Promise<[{ id, busy, startedAt }]>, oldest first
+}
+```
+Claude Code writes `~/.claude/sessions/<pid>.json` with `kind` ('interactive'|'bg'), `status` ('idle'|'busy'), `procStart` (= field 22 of /proc/<pid>/stat). Only interactive sessions whose pid is alive with the same start time count. extension.js watches the directory (FileMonitor, 250 ms debounce) + polls every 5 s; nothing runs when `crab-mode` is 'off'.
 
 ### Settings keys (gschema)
 - `refresh-interval` (u, default 60, range 30..3600) seconds
 - `warn-threshold` (i, default 70, 1..100) percent → yellow
 - `critical-threshold` (i, default 90, 1..100) percent → red
 - `plan-refresh-interval` (u, default 300, range 60..3600) seconds — Anthropic usage endpoint (rate-limited)
-- `bar-color-mode` (s, 'accent' | 'traffic', default 'accent')
+- `bar-color-mode` (s, 'accent' | 'traffic', default 'accent') — menu bars and top-bar rings
+- `panel-show-five-hour`, `panel-show-seven-day` (b, default true) — top-bar rings
+- `crab-mode` (s, 'per-session' | 'max' | 'off', default 'per-session'), `crab-max` (u, default 3, 1..20)
+- `panel-max-width` (u, default 100, 40..400) px for rings + crabs; crabs beyond what fits (min 14 px apart) are dropped, busy ones first
 
 ## Verification
 - Pure modules (parser, usage, data) can be run outside the shell: `gjs -m tests/test-<name>.js`.

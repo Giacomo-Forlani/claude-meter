@@ -9,6 +9,7 @@ import {ClaudeMeterIndicator} from './lib/indicator.js';
 import {TokenParser} from './lib/tokenParser.js';
 import {UsageManager} from './lib/usageManager.js';
 import {DataManager} from './lib/dataManager.js';
+import {SessionMonitor} from './lib/sessionMonitor.js';
 
 // The usage endpoint rate-limits aggressively (HTTP 429): plan requests are
 // scheduled separately from the local token scan.
@@ -24,6 +25,10 @@ const RATE_LIMIT_MAX_MS = 30 * 60 * 1000;
 // Persist parser offsets at least this often even without new records.
 const FORCED_SAVE_MS = 10 * 60 * 1000;
 const RESUME_DELAY_S = 5;
+// Claude Code sessions (crabs): file changes are picked up right away; the
+// poll catches processes that died without removing their file.
+const SESSION_POLL_S = 5;
+const SESSION_DEBOUNCE_MS = 250;
 
 const PLAN_ERRORS = {
     'no-credentials': 'Credenziali Claude Code non trovate',
@@ -64,6 +69,13 @@ export default class ClaudeMeterExtension extends Extension {
         this._settingsChangedId = this._settings.connect('changed::refresh-interval',
             () => this._restartTimer());
 
+        this._sessions = new SessionMonitor();
+        this._sessionScanning = false;
+        this._sessionRescan = false;
+        this._crabModeId = this._settings.connect('changed::crab-mode',
+            () => this._updateSessionWatch());
+        this._updateSessionWatch();
+
         this._loginManager = LoginManager.getLoginManager();
         this._sleepId = this._loginManager.connect('prepare-for-sleep', (_lm, aboutToSuspend) => {
             if (aboutToSuspend)
@@ -88,6 +100,12 @@ export default class ClaudeMeterExtension extends Extension {
 
         this._removeTimer();
         this._removeResumeSource();
+        this._stopSessionWatch();
+        if (this._crabModeId) {
+            this._settings.disconnect(this._crabModeId);
+            this._crabModeId = 0;
+        }
+        this._sessions = null;
 
         if (this._sleepId) {
             this._loginManager.disconnect(this._sleepId);
@@ -109,6 +127,80 @@ export default class ClaudeMeterExtension extends Extension {
         this._parser = null;
         this._data = null;
         this._refreshing = null;
+    }
+
+    // ------------------------------------------------------------ sessions / crabs
+
+    _updateSessionWatch() {
+        if (this._settings.get_string('crab-mode') === 'off') {
+            this._stopSessionWatch();
+            this._indicator?.setSessions([]);
+            return;
+        }
+        if (this._sessionPollId)
+            return;
+
+        try {
+            const dir = Gio.File.new_for_path(this._sessions.directory);
+            this._sessionDirMonitor = dir.monitor_directory(Gio.FileMonitorFlags.NONE, null);
+            this._sessionDirMonitor.connect('changed', () => this._queueSessionScan());
+        } catch (e) {
+            console.debug(`Claude Meter: session directory not watched: ${e.message}`);
+            this._sessionDirMonitor = null;
+        }
+        this._sessionPollId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, SESSION_POLL_S, () => {
+            this._scanSessions();
+            return GLib.SOURCE_CONTINUE;
+        });
+        this._scanSessions();
+    }
+
+    _stopSessionWatch() {
+        if (this._sessionPollId) {
+            GLib.source_remove(this._sessionPollId);
+            this._sessionPollId = 0;
+        }
+        if (this._sessionDebounceId) {
+            GLib.source_remove(this._sessionDebounceId);
+            this._sessionDebounceId = 0;
+        }
+        this._sessionDirMonitor?.cancel();
+        this._sessionDirMonitor = null;
+    }
+
+    _queueSessionScan() {
+        if (this._sessionDebounceId)
+            return;
+        this._sessionDebounceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, SESSION_DEBOUNCE_MS, () => {
+            this._sessionDebounceId = 0;
+            this._scanSessions();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    async _scanSessions() {
+        if (!this._sessions || !this._cancellable)
+            return;
+        if (this._sessionScanning) {
+            this._sessionRescan = true;
+            return;
+        }
+        this._sessionScanning = true;
+        const cancellable = this._cancellable;
+        try {
+            const sessions = await this._sessions.scan(cancellable);
+            if (!cancellable.is_cancelled() && this._sessionPollId)
+                this._indicator?.setSessions(sessions);
+        } catch (e) {
+            if (!isCancelled(e))
+                console.debug(`Claude Meter: session scan failed: ${e.message}`);
+        } finally {
+            this._sessionScanning = false;
+            if (this._sessionRescan && !cancellable.is_cancelled()) {
+                this._sessionRescan = false;
+                this._scanSessions();
+            }
+        }
     }
 
     async _start() {

@@ -25,3 +25,9 @@
 .claude-meter-title {
     color: #222226;
 }
+
+.claude-meter-ring {
+    -claude-meter-ring-normal: #26a269;
+    -claude-meter-ring-warning: #e5a50a;
+    -claude-meter-ring-critical: #e01b24;
+}

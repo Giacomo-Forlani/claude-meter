@@ -123,3 +123,12 @@
     font-weight: 700;
     margin-top: 2px;
 }
+
+/* Top bar: usage rings + Claude crabs. */
+.claude-meter-panel {
+    spacing: 4px; /* PANEL_SPACING in lib/indicator.js */
+}
+
+.claude-meter-ring {
+    -claude-meter-ring-color: -st-accent-color;
+}

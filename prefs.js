@@ -48,12 +48,81 @@ export default class ClaudeMeterPrefs extends ExtensionPreferences {
         refreshGroup.add(planRow);
         settings.bind('plan-refresh-interval', planRow, 'value', Gio.SettingsBindFlags.DEFAULT);
 
+        const panelGroup = new Adw.PreferencesGroup({
+            title: 'Barra superiore',
+            description: 'Se non è attivo nulla viene mostrata l\'icona.',
+        });
+        page.add(panelGroup);
+
+        const fiveHourRow = new Adw.SwitchRow({title: 'Cerchio sessione (5 h)'});
+        panelGroup.add(fiveHourRow);
+        settings.bind('panel-show-five-hour', fiveHourRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+
+        const sevenDayRow = new Adw.SwitchRow({title: 'Cerchio settimanale'});
+        panelGroup.add(sevenDayRow);
+        settings.bind('panel-show-seven-day', sevenDayRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+
+        const crabModes = ['per-session', 'max', 'off'];
+        const crabRow = new Adw.ComboRow({
+            title: 'Granchi',
+            subtitle: 'Uno per ogni sessione di Claude Code aperta',
+            model: Gtk.StringList.new(['Uno per sessione', 'Numero massimo', 'Nessuno']),
+        });
+        panelGroup.add(crabRow);
+
+        const crabMaxRow = new Adw.SpinRow({
+            title: 'Numero massimo di granchi',
+            adjustment: new Gtk.Adjustment({
+                lower: 1,
+                upper: 20,
+                step_increment: 1,
+                page_increment: 5,
+                value: settings.get_uint('crab-max'),
+            }),
+            digits: 0,
+        });
+        panelGroup.add(crabMaxRow);
+        settings.bind('crab-max', crabMaxRow, 'value', Gio.SettingsBindFlags.DEFAULT);
+
+        const syncCrabRow = () => {
+            const mode = settings.get_string('crab-mode');
+            const index = crabModes.indexOf(mode);
+            crabRow.selected = index < 0 ? 0 : index;
+            crabMaxRow.sensitive = mode === 'max';
+        };
+        syncCrabRow();
+        crabRow.connect('notify::selected', () => {
+            const mode = crabModes[crabRow.selected] ?? 'per-session';
+            if (settings.get_string('crab-mode') !== mode)
+                settings.set_string('crab-mode', mode);
+        });
+        const crabChangedId = settings.connect('changed::crab-mode', syncCrabRow);
+        window.connect('close-request', () => {
+            settings.disconnect(crabChangedId);
+            return false;
+        });
+
+        const widthRow = new Adw.SpinRow({
+            title: 'Larghezza massima',
+            subtitle: 'Pixel occupati da cerchi e granchi (40-400)',
+            adjustment: new Gtk.Adjustment({
+                lower: 40,
+                upper: 400,
+                step_increment: 10,
+                page_increment: 50,
+                value: settings.get_uint('panel-max-width'),
+            }),
+            digits: 0,
+        });
+        panelGroup.add(widthRow);
+        settings.bind('panel-max-width', widthRow, 'value', Gio.SettingsBindFlags.DEFAULT);
+
         const lookGroup = new Adw.PreferencesGroup({title: 'Aspetto'});
         page.add(lookGroup);
 
         const modes = ['accent', 'traffic'];
         const colorRow = new Adw.ComboRow({
-            title: 'Colore delle barre',
+            title: 'Colore di barre e cerchi',
             // Explicit line break: a narrower subtitle leaves room for the dropdown.
             subtitle: "Accento di sistema, oppure\nverde/giallo/rosso secondo le soglie",
             subtitle_lines: 2,
@@ -146,7 +215,7 @@ export default class ClaudeMeterPrefs extends ExtensionPreferences {
                 return;
             window.disconnect(focusId);
             GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-                for (const row of [refreshRow, planRow])
+                for (const row of [refreshRow, planRow, crabMaxRow, widthRow])
                     row.set_position(-1); // clears the select-on-focus selection
                 window.set_focus(null);
                 return GLib.SOURCE_REMOVE;
