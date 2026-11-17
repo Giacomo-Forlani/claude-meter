@@ -307,13 +307,10 @@ test('active: .key / garbage / malformed registry files ignored', async () => {
     assertEqual((await listOne(env, 'g')).active, false, 'active');
 });
 
-test('active: 5-minute mtime fallback', async () => {
+test('active: recent mtime without a live pid is NOT active', async () => {
     const env = makeEnv();
-    addConv(env, 'p', 'fresh', [L({type: 'x'})], Date.now() - 60 * 1000);
-    addConv(env, 'p', 'stale', [L({type: 'x'})], Date.now() - 10 * 60 * 1000);
-    const by = Object.fromEntries((await env.store.list()).map(s => [s.sessionId, s.active]));
-    assertEqual(by.fresh, true, 'fresh');
-    assertEqual(by.stale, false, 'stale');
+    addConv(env, 'p', 'fresh', [L({type: 'x'})], Date.now() - 1000);
+    assertEqual((await listOne(env, 'fresh')).active, false, 'fresh');
 });
 
 test('targets: only existing ones, fixed order, todos prefix match', async () => {
@@ -425,14 +422,14 @@ test('trash refuses an active conversation (registry) and trashes nothing', asyn
     assertEqual(calls.length, 0, 'no trash calls');
 });
 
-test('trash refuses a recently modified conversation (mtime fallback)', async () => {
+test('trash accepts a recently modified conversation with no live pid', async () => {
     const env = makeEnv();
     addConv(env, 'p', 's', [L({type: 'x'})], Date.now() - 1000);
     const calls = [];
     env.store._trashPath = async p => calls.push(p);
-    await assertRejects(() => env.store.trash(sessionFor(env, 'p', 's')),
-        e => e.code === 'active', 'trash recent');
-    assertEqual(calls.length, 0, 'no trash calls');
+    const res = await env.store.trash(sessionFor(env, 'p', 's'));
+    assertEqual(res.trashed.length, 1, 'trashed');
+    assertEqual(calls.length, 1, 'calls');
 });
 
 test('trash: success path trashes all targets in order', async () => {
@@ -468,6 +465,216 @@ test('trash: partial failure reported, continues after error', async () => {
     assertEqual(res.failed.length, 1, 'one failed');
     assertEqual(res.failed[0].path, bad, 'failed path');
     assertEqual(res.failed[0].message, 'boom', 'failed message');
+});
+
+// ------------------------------------------------------- multi / project
+
+function markLive(env, pid, id) {
+    mkdir(join(env.proc, String(pid)));
+    writeFile(join(env.claude, 'sessions', `${pid}.json`), JSON.stringify({pid, sessionId: id}));
+}
+
+function fakeTrash(env, failOn = null) {
+    const calls = [];
+    env.store._trashPath = async p => {
+        calls.push(p);
+        if (p === failOn)
+            throw new Error('boom');
+    };
+    return calls;
+}
+
+test('multi targets: two of three -> single targets, no project-dir', async () => {
+    const env = makeEnv();
+    for (const id of ['a', 'b', 'c'])
+        addConv(env, 'p', id, [L({type: 'x'})]);
+    const t = await env.store.getDeletionTargetsFor([sessionFor(env, 'p', 'a'), sessionFor(env, 'p', 'b')]);
+    const p = join(env.claude, 'projects', 'p');
+    assertJson(t, [
+        {path: join(p, 'a.jsonl'), kind: 'conversation'},
+        {path: join(p, 'b.jsonl'), kind: 'conversation'},
+    ], 'targets');
+});
+
+test('multi targets: all conversations -> one project-dir', async () => {
+    const env = makeEnv();
+    for (const id of ['a', 'b', 'c'])
+        addConv(env, 'p', id, [L({type: 'x'})]);
+    mkdir(join(env.claude, 'projects', 'p', 'a'));
+    mkdir(join(env.claude, 'projects', 'p', 'memory'));
+    const t = await env.store.getDeletionTargetsFor(['a', 'b', 'c'].map(i => sessionFor(env, 'p', i)));
+    assertJson(t, [{path: join(env.claude, 'projects', 'p'), kind: 'project-dir'}], 'targets');
+});
+
+test('multi targets: all conversations but a stray file remains -> no project-dir', async () => {
+    const env = makeEnv();
+    for (const id of ['a', 'b'])
+        addConv(env, 'p', id, [L({type: 'x'})]);
+    writeFile(join(env.claude, 'projects', 'p', 'stray.txt'), 'x');
+    const t = await env.store.getDeletionTargetsFor(['a', 'b'].map(i => sessionFor(env, 'p', i)));
+    assertJson(t.map(x => x.kind), ['conversation', 'conversation'], 'kinds');
+});
+
+test('multi targets: rule applied project by project', async () => {
+    const env = makeEnv();
+    addConv(env, 'p1', 'a', [L({type: 'x'})]);
+    addConv(env, 'p2', 'b', [L({type: 'x'})]);
+    addConv(env, 'p2', 'c', [L({type: 'x'})]);
+    const t = await env.store.getDeletionTargetsFor([
+        sessionFor(env, 'p1', 'a'), sessionFor(env, 'p2', 'b')]);
+    assertJson(t, [
+        {path: join(env.claude, 'projects', 'p1'), kind: 'project-dir'},
+        {path: join(env.claude, 'projects', 'p2', 'b.jsonl'), kind: 'conversation'},
+    ], 'targets');
+});
+
+test('multi targets: linked data per conversation, no duplicates', async () => {
+    const env = makeEnv();
+    addConv(env, 'p', 'a', [L({type: 'x'})]);
+    addConv(env, 'p', 'b', [L({type: 'x'})]);
+    addConv(env, 'p', 'keep', [L({type: 'x'})]);
+    mkdir(join(env.claude, 'file-history', 'a'));
+    mkdir(join(env.claude, 'session-env', 'b'));
+    writeFile(join(env.claude, 'todos', 'a-agent-a.json'), '[]');
+    writeFile(join(env.claude, 'todos', 'b-agent-b.json'), '[]');
+    const sa = sessionFor(env, 'p', 'a');
+    const t = await env.store.getDeletionTargetsFor([sa, sessionFor(env, 'p', 'b'), sa]);
+    const paths = t.map(x => x.path);
+    assertEqual(new Set(paths).size, paths.length, 'no duplicates');
+    assertEqual(t.length, 6, 'two conversations + 4 linked');
+    assert(t.some(x => x.kind === 'file-history') && t.some(x => x.kind === 'session-env'), 'linked kinds');
+    assertEqual(t.filter(x => x.kind === 'todos').length, 2, 'todos');
+});
+
+test('multi targets: single element equals getDeletionTargets', async () => {
+    const env = makeEnv();
+    addConv(env, 'p', 's', [L({type: 'x'})]);
+    addConv(env, 'p', 'o', [L({type: 'x'})]);
+    mkdir(join(env.claude, 'projects', 'p', 's'));
+    mkdir(join(env.claude, 'file-history', 's'));
+    writeFile(join(env.claude, 'todos', 's-agent-s.json'), '[]');
+    const s = sessionFor(env, 'p', 's');
+    assertJson(await env.store.getDeletionTargetsFor([s]), await env.store.getDeletionTargets(s), 'same');
+    assertJson(await env.store.getDeletionTargetsFor([]), [], 'empty');
+});
+
+test('trashMany: active one skipped, others trashed, project-dir kept', async () => {
+    const env = makeEnv();
+    for (const id of ['a', 'b', 'live'])
+        addConv(env, 'p', id, [L({type: 'x'})]);
+    markLive(env, 91, 'live');
+    const calls = fakeTrash(env);
+    const live = sessionFor(env, 'p', 'live');
+    const res = await env.store.trashMany([sessionFor(env, 'p', 'a'), live, sessionFor(env, 'p', 'b')]);
+    const p = join(env.claude, 'projects', 'p');
+    assertJson(calls, [join(p, 'a.jsonl'), join(p, 'b.jsonl')], 'calls');
+    assertJson(res.trashed, calls, 'trashed');
+    assertEqual(res.skippedActive.length, 1, 'skipped count');
+    assertEqual(res.skippedActive[0], live, 'skipped is the original object');
+    assertEqual(res.failed.length, 0, 'no failures');
+});
+
+test('trashMany: error on one target, the others proceed', async () => {
+    const env = makeEnv();
+    for (const id of ['a', 'b', 'c'])
+        addConv(env, 'p', id, [L({type: 'x'})]);
+    const p = join(env.claude, 'projects', 'p');
+    const calls = fakeTrash(env, join(p, 'a.jsonl'));
+    const res = await env.store.trashMany([sessionFor(env, 'p', 'a'), sessionFor(env, 'p', 'b')]);
+    assertEqual(calls.length, 2, 'both attempted');
+    assertJson(res.trashed, [join(p, 'b.jsonl')], 'trashed');
+    assertEqual(res.failed.length, 1, 'failed count');
+    assertEqual(res.failed[0].message, 'boom', 'message');
+});
+
+test('trashMany: invalid session -> throws, nothing trashed', async () => {
+    const env = makeEnv();
+    addConv(env, 'p', 'a', [L({type: 'x'})]);
+    const calls = fakeTrash(env);
+    await assertRejects(() => env.store.trashMany([
+        sessionFor(env, 'p', 'a'), {...sessionFor(env, 'p', 'a'), sessionId: '..'}]), null, 'bad');
+    await assertRejects(() => env.store.trashMany(null), null, 'not an array');
+    assertEqual(calls.length, 0, 'no calls');
+});
+
+test('trashMany: empty list is a no-op', async () => {
+    const env = makeEnv();
+    const calls = fakeTrash(env);
+    assertJson(await env.store.trashMany([]), {trashed: [], failed: [], skippedActive: []}, 'result');
+    assertEqual(calls.length, 0, 'no calls');
+});
+
+test('project targets: project-dir plus linked data of all sessions', async () => {
+    const env = makeEnv();
+    addConv(env, 'p', 'a', [L({type: 'x'})]);
+    addConv(env, 'p', 'b', [L({type: 'x'})]);
+    writeFile(join(env.claude, 'projects', 'p', 'memory', 'MEMORY.md'), 'x');
+    writeFile(join(env.claude, 'projects', 'p', 'extra.txt'), 'x');
+    mkdir(join(env.claude, 'file-history', 'a'));
+    mkdir(join(env.claude, 'session-env', 'b'));
+    writeFile(join(env.claude, 'todos', 'b-agent-b.json'), '[]');
+    addConv(env, 'q', 'z', [L({type: 'x'})]);
+    mkdir(join(env.claude, 'file-history', 'z'));
+    const dir = join(env.claude, 'projects', 'p');
+    assertJson(await env.store.getProjectDeletionTargets(dir), [
+        {path: dir, kind: 'project-dir'},
+        {path: join(env.claude, 'file-history', 'a'), kind: 'file-history'},
+        {path: join(env.claude, 'session-env', 'b'), kind: 'session-env'},
+        {path: join(env.claude, 'todos', 'b-agent-b.json'), kind: 'todos'},
+    ], 'targets');
+    const calls = fakeTrash(env);
+    const res = await env.store.trashProject(dir);
+    assertJson(res.trashed, calls, 'trashed');
+    assertEqual(res.trashed.length, 4, 'four');
+    assertEqual(res.failed.length, 0, 'no failures');
+});
+
+test('trashProject: active conversation -> code active, nothing trashed', async () => {
+    const env = makeEnv();
+    addConv(env, 'p', 'a', [L({type: 'x'})]);
+    addConv(env, 'p', 'b', [L({type: 'x'})]);
+    markLive(env, 92, 'b');
+    const calls = fakeTrash(env);
+    await assertRejects(() => env.store.trashProject(join(env.claude, 'projects', 'p')),
+        e => e.code === 'active', 'active');
+    assertEqual(calls.length, 0, 'no calls');
+});
+
+test('project: conversation created after list() is covered', async () => {
+    const env = makeEnv();
+    addConv(env, 'p', 'a', [L({type: 'x'})]);
+    await env.store.list();
+    addConv(env, 'p', 'late', [L({type: 'x'})]);
+    mkdir(join(env.claude, 'file-history', 'late'));
+    const dir = join(env.claude, 'projects', 'p');
+    const t = await env.store.getProjectDeletionTargets(dir);
+    assert(t.some(x => x.path === join(env.claude, 'file-history', 'late')), 'late linked data');
+    // an active late conversation blocks as well
+    markLive(env, 93, 'late');
+    await assertRejects(() => env.store.trashProject(dir), e => e.code === 'active', 'late active');
+});
+
+test('project: dir outside projects/ or with .. rejected', async () => {
+    const env = makeEnv();
+    addConv(env, 'p', 'a', [L({type: 'x'})]);
+    const outside = makeTmpDir();
+    const calls = fakeTrash(env);
+    const bads = [
+        outside,
+        env.claude,
+        join(env.claude, 'projects'),
+        join(env.claude, 'projects', 'p', 'sub'),
+        join(env.claude, 'projects', 'p', '..', 'p'),
+        join(env.claude, 'projects', 'p', '..', '..', 'x'),
+        'relative/p',
+        '',
+        null,
+    ];
+    for (let i = 0; i < bads.length; i++) {
+        await assertRejects(() => env.store.getProjectDeletionTargets(bads[i]), null, `targets bad #${i}`);
+        await assertRejects(() => env.store.trashProject(bads[i]), null, `trash bad #${i}`);
+    }
+    assertEqual(calls.length, 0, 'no calls');
 });
 
 // -------------------------------------------------------------------- smoke
