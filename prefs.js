@@ -1,5 +1,6 @@
 import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
+import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
@@ -42,7 +43,13 @@ function groupByProject(sessions) {
 }
 
 // The "Conversazioni" page: list of conversations grouped by project, with
-// move-to-trash support. `store` is a SessionStore (or a compatible fake).
+// move-to-trash support (single, multi-selection, whole project). `store` is a
+// SessionStore (or a compatible fake).
+//
+// Action bar: Adw.PreferencesPage has no bottom bar and Adw.PreferencesWindow
+// only accepts PreferencesPage children (no ToolbarView around one page), so
+// the selection actions live in the header of the first group, in place of
+// the "Seleziona" button.
 class SessionsPage {
     constructor(window, store) {
         this._window = window;
@@ -50,8 +57,14 @@ class SessionsPage {
         this._generation = 0;
         this._cancellable = null;
         this._closed = false;
+        this._busy = false;
+        this._syncing = false;
+        this._selectionMode = false;
+        this._selected = new Set();
+        this._escController = null;
         this._projectGroups = [];
-        this._rows = new Map(); // session -> {row, group, projectSessions}
+        this._groups = new Map(); // group -> {sessions, check, trashButton}
+        this._rows = new Map(); // session -> {row, group, projectSessions, check}
         this._statusWidget = null;
 
         this.page = new Adw.PreferencesPage({
@@ -59,20 +72,49 @@ class SessionsPage {
             icon_name: 'user-trash-symbolic',
         });
 
-        // Always-visible first group: hosts the reload button and the
+        // Always-visible first group: hosts the header buttons and the
         // loading / empty / error states.
         this._headGroup = new Adw.PreferencesGroup({
             title: 'Conversazioni',
             description: 'Le conversazioni eliminate vengono spostate nel cestino.',
         });
-        const reload = new Gtk.Button({
+        this._headBox = new Gtk.Box({orientation: Gtk.Orientation.HORIZONTAL, spacing: 6, valign: Gtk.Align.CENTER});
+
+        this._selectButton = new Gtk.Button({
+            label: 'Seleziona',
+            tooltip_text: 'Seleziona più conversazioni da eliminare',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+        });
+        this._selectButton.connect('clicked', () => this._setSelectionMode(true));
+
+        this._deleteSelectedButton = new Gtk.Button({
+            label: 'Elimina selezionate (0)',
+            sensitive: false,
+            visible: false,
+            valign: Gtk.Align.CENTER,
+            css_classes: ['destructive-action'],
+        });
+        this._deleteSelectedButton.connect('clicked', () => this._onTrashSelected());
+
+        this._cancelSelectButton = new Gtk.Button({
+            label: 'Annulla',
+            visible: false,
+            valign: Gtk.Align.CENTER,
+        });
+        this._cancelSelectButton.connect('clicked', () => this._setSelectionMode(false));
+
+        this._reloadButton = new Gtk.Button({
             icon_name: 'view-refresh-symbolic',
             tooltip_text: 'Ricarica elenco',
             valign: Gtk.Align.CENTER,
             css_classes: ['flat'],
         });
-        reload.connect('clicked', () => this.reload());
-        this._headGroup.set_header_suffix(reload);
+        this._reloadButton.connect('clicked', () => this.reload());
+
+        for (const w of [this._selectButton, this._deleteSelectedButton, this._cancelSelectButton, this._reloadButton])
+            this._headBox.append(w);
+        this._headGroup.set_header_suffix(this._headBox);
         this.page.add(this._headGroup);
     }
 
@@ -82,6 +124,7 @@ class SessionsPage {
         this._generation++;
         this._cancellable?.cancel();
         this._cancellable = null;
+        this._removeEscController();
     }
 
     _setStatus(widget) {
@@ -96,7 +139,10 @@ class SessionsPage {
         for (const group of this._projectGroups)
             this.page.remove(group);
         this._projectGroups = [];
+        this._groups.clear();
         this._rows.clear();
+        this._selected.clear();
+        this._syncSelectionUi();
     }
 
     _showLoading() {
@@ -156,6 +202,92 @@ class SessionsPage {
         this._populate(sessions);
     }
 
+    // ---- selection mode ----
+
+    _setSelectionMode(on) {
+        if (this._busy || this._closed)
+            return;
+        this._applySelectionMode(on);
+    }
+
+    _applySelectionMode(on) {
+        if (this._selectionMode === on)
+            return;
+        this._selectionMode = on;
+        this._selected.clear();
+        for (const [session, entry] of this._rows) {
+            entry.check.visible = on;
+            entry.trashButton.visible = !on;
+            entry.row.activatable_widget = on && !session.active ? entry.check : null;
+        }
+        for (const info of this._groups.values()) {
+            info.check.visible = on;
+            info.trashButton.visible = !on;
+        }
+        if (on)
+            this._addEscController();
+        else
+            this._removeEscController();
+        this._syncSelectionUi();
+    }
+
+    // Esc leaves selection mode. The controller exists only while the mode is
+    // on, and lets Esc through while an operation/dialog is in progress.
+    _addEscController() {
+        if (this._escController)
+            return;
+        const controller = new Gtk.EventControllerKey({propagation_phase: Gtk.PropagationPhase.CAPTURE});
+        controller.connect('key-pressed', (_c, keyval) => {
+            if (keyval !== Gdk.KEY_Escape || this._busy || !this._selectionMode)
+                return false;
+            this._applySelectionMode(false);
+            return true;
+        });
+        this._window.add_controller(controller);
+        this._escController = controller;
+    }
+
+    _removeEscController() {
+        if (!this._escController)
+            return;
+        this._window.remove_controller(this._escController);
+        this._escController = null;
+    }
+
+    // Reflect _selected and the mode on every selection widget.
+    _syncSelectionUi() {
+        this._syncing = true;
+        try {
+            for (const [session, entry] of this._rows)
+                entry.check.active = this._selected.has(session);
+            for (const info of this._groups.values()) {
+                const eligible = info.sessions.filter(s => !s.active);
+                const count = eligible.filter(s => this._selected.has(s)).length;
+                const all = eligible.length > 0 && count === eligible.length;
+                info.check.sensitive = eligible.length > 0;
+                info.check.inconsistent = count > 0 && !all;
+                info.check.active = all;
+            }
+        } finally {
+            this._syncing = false;
+        }
+        const n = this._selected.size;
+        const on = this._selectionMode;
+        this._selectButton.visible = !on;
+        this._deleteSelectedButton.visible = on;
+        this._cancelSelectButton.visible = on;
+        this._deleteSelectedButton.label = `Elimina selezionate (${n})`;
+        this._deleteSelectedButton.sensitive = n > 0;
+    }
+
+    // Disable the controls while an operation runs (the page stays scrollable).
+    _setBusy(busy) {
+        this._busy = busy;
+        this._headBox.sensitive = !busy;
+        for (const group of this._projectGroups)
+            group.sensitive = !busy;
+    }
+
     _populate(sessions) {
         this._clearProjects();
         if (sessions.length === 0) {
@@ -169,12 +301,55 @@ class SessionsPage {
             const group = new Adw.PreferencesGroup({
                 // Group titles are Pango markup: escape the path.
                 title: GLib.markup_escape_text(projectPath ? tildify(projectPath) : '—', -1),
+                sensitive: !this._busy,
             });
+            this._addGroupHeader(group, projectSessions, projectPath);
             this.page.add(group);
             this._projectGroups.push(group);
             for (const session of projectSessions)
                 this._addRow(group, session, projectSessions);
         }
+        this._syncSelectionUi();
+    }
+
+    _addGroupHeader(group, projectSessions, projectPath) {
+        const box = new Gtk.Box({orientation: Gtk.Orientation.HORIZONTAL, spacing: 6, valign: Gtk.Align.CENTER});
+
+        const check = new Gtk.CheckButton({
+            tooltip_text: 'Seleziona tutte le conversazioni del progetto',
+            valign: Gtk.Align.CENTER,
+            visible: this._selectionMode,
+        });
+        check.connect('toggled', () => {
+            if (this._syncing)
+                return;
+            for (const s of projectSessions.filter(s => !s.active)) {
+                if (check.active)
+                    this._selected.add(s);
+                else
+                    this._selected.delete(s);
+            }
+            this._syncSelectionUi();
+        });
+
+        const trashButton = new Gtk.Button({
+            icon_name: 'user-trash-symbolic',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+            visible: !this._selectionMode,
+        });
+        if (projectSessions.some(s => s.active)) {
+            trashButton.sensitive = false;
+            trashButton.tooltip_text = 'Il progetto ha una conversazione in corso: non può essere eliminato';
+        } else {
+            trashButton.tooltip_text = 'Elimina i dati del progetto';
+            trashButton.connect('clicked', () => this._onTrashProject(projectSessions, projectPath));
+        }
+
+        box.append(check);
+        box.append(trashButton);
+        group.set_header_suffix(box);
+        this._groups.set(group, {sessions: projectSessions, check, trashButton});
     }
 
     _addRow(group, session, projectSessions) {
@@ -186,10 +361,27 @@ class SessionsPage {
         row.subtitle = `Ultima apertura ${formatDate(session.lastUsedAt)} · ` +
             `Creata ${formatDate(session.createdAt)}`;
 
+        const check = new Gtk.CheckButton({
+            valign: Gtk.Align.CENTER,
+            visible: this._selectionMode,
+            sensitive: !session.active,
+        });
+        check.connect('toggled', () => {
+            if (this._syncing)
+                return;
+            if (check.active)
+                this._selected.add(session);
+            else
+                this._selected.delete(session);
+            this._syncSelectionUi();
+        });
+        row.add_prefix(check);
+
         const button = new Gtk.Button({
             icon_name: 'user-trash-symbolic',
             valign: Gtk.Align.CENTER,
             css_classes: ['flat'],
+            visible: !this._selectionMode,
         });
         if (session.active) {
             row.add_suffix(new Gtk.Label({
@@ -201,11 +393,13 @@ class SessionsPage {
             button.tooltip_text = 'Una conversazione in corso non può essere eliminata';
         } else {
             button.tooltip_text = 'Sposta nel cestino';
-            button.connect('clicked', () => this._onTrash(session, button));
+            button.connect('clicked', () => this._onTrash(session));
         }
         row.add_suffix(button);
+        if (this._selectionMode && !session.active)
+            row.activatable_widget = check;
         group.add(row);
-        this._rows.set(session, {row, group, projectSessions});
+        this._rows.set(session, {row, group, projectSessions, check, trashButton: button});
     }
 
     _toast(title) {
@@ -213,35 +407,149 @@ class SessionsPage {
             this._window.add_toast(new Adw.Toast({title}));
     }
 
-    async _onTrash(session, button) {
-        button.sensitive = false;
+    // ---- operations: single / selection / project ----
+
+    async _onTrash(session) {
+        if (this._busy)
+            return;
+        this._setBusy(true);
         try {
-            await this._confirmAndTrash(session);
+            const targets = await this._prepare(() => this._store.getDeletionTargets(session, this._cancellable));
+            if (!targets)
+                return;
+            const result = await this._confirmAndTrash({
+                targets,
+                heading: `Eliminare «${session.title ?? 'Senza titolo'}»?`,
+                body: 'Verranno spostati nel cestino:',
+                trash: () => this._store.trash(session, null),
+                activeMessage: 'La conversazione è in corso: non può essere eliminata',
+            });
+            if (!result)
+                return;
+            if (result.failed.length === 0) {
+                this._removeRow(session);
+                this._toast('Spostata nel cestino');
+            } else {
+                this._reportPartial(result);
+            }
         } finally {
-            if (this._rows.has(session) && !this._closed)
-                button.sensitive = true;
+            this._setBusy(false);
         }
     }
 
-    async _confirmAndTrash(session) {
-        let targets;
+    async _onTrashSelected() {
+        if (this._busy || this._selected.size === 0)
+            return;
+        const sessions = [...this._selected];
+        this._setBusy(true);
         try {
-            targets = await this._store.getDeletionTargets(session, this._cancellable);
-        } catch (e) {
-            if (this._closed)
+            const targets = await this._prepare(() => this._store.getDeletionTargetsFor(sessions, this._cancellable));
+            if (!targets)
                 return;
-            console.debug(`claude-meter: deletion targets failed: ${e.message}`);
-            this._toast("Impossibile preparare l'eliminazione");
+            const n = sessions.length;
+            const result = await this._confirmAndTrash({
+                targets,
+                heading: n === 1 ? 'Eliminare 1 conversazione?' : `Eliminare ${n} conversazioni?`,
+                body: 'Verranno spostati nel cestino:',
+                trash: () => this._store.trashMany(sessions, null),
+                activeMessage: 'Una conversazione è in corso: non può essere eliminata',
+            });
+            if (!result)
+                return;
+
+            const skipped = result.skippedActive?.length ?? 0;
+            const failed = result.failed.length;
+            if (failed === 0 && skipped === 0) {
+                this._applySelectionMode(false);
+                for (const s of sessions)
+                    this._removeRow(s);
+                this._toast(n === 1 ? '1 conversazione spostata nel cestino'
+                    : `${n} conversazioni spostate nel cestino`);
+            } else if (failed > 0 && result.trashed.length === 0 && skipped === 0) {
+                this._toast('Eliminazione non riuscita');
+            } else {
+                const deleted = n - skipped;
+                let msg = skipped > 0
+                    ? `${deleted} eliminate, ${skipped} in corso non eliminate`
+                    : `${deleted} eliminate`;
+                if (failed > 0)
+                    msg += `; ${failed === 1 ? '1 elemento non eliminato' : `${failed} elementi non eliminati`}`;
+                this._toast(msg);
+                this._applySelectionMode(false);
+                this.reload();
+            }
+        } finally {
+            this._setBusy(false);
+        }
+    }
+
+    async _onTrashProject(projectSessions, projectPath) {
+        if (this._busy || projectSessions.length === 0)
+            return;
+        const projectDir = projectSessions[0].projectDir;
+        const sessions = [...projectSessions];
+        this._setBusy(true);
+        try {
+            const targets = await this._prepare(() => this._store.getProjectDeletionTargets(projectDir, this._cancellable));
+            if (!targets)
+                return;
+            const n = sessions.length;
+            const result = await this._confirmAndTrash({
+                targets,
+                heading: `Eliminare i dati del progetto «${projectPath ? tildify(projectPath) : '—'}»?`,
+                body: `${n === 1 ? '1 conversazione' : `${n} conversazioni`} e la memoria di Claude su questo ` +
+                    'progetto verranno spostate nel cestino. La cartella del progetto con il codice ' +
+                    'sorgente non viene toccata.',
+                trash: () => this._store.trashProject(projectDir, null),
+                activeMessage: 'Il progetto ha una conversazione in corso: non può essere eliminato',
+            });
+            if (!result)
+                return;
+            if (result.failed.length === 0) {
+                for (const s of sessions)
+                    this._removeRow(s);
+                this._toast('Dati del progetto spostati nel cestino');
+            } else {
+                this._reportPartial(result);
+            }
+        } finally {
+            this._setBusy(false);
+        }
+    }
+
+    // Toast + reload for an operation that left something behind.
+    _reportPartial(result) {
+        const failed = result.failed.length;
+        if (result.trashed.length === 0) {
+            this._toast('Eliminazione non riuscita');
             return;
         }
-        if (this._closed)
-            return;
+        this._toast(failed === 1 ? '1 elemento non eliminato' : `${failed} elementi non eliminati`);
+        this._applySelectionMode(false);
+        this.reload();
+    }
 
+    // Compute the deletion targets; null (with a toast) on failure/close.
+    async _prepare(compute) {
+        let targets;
+        try {
+            targets = await compute();
+        } catch (e) {
+            if (this._closed)
+                return null;
+            console.debug(`claude-meter: deletion targets failed: ${e.message}`);
+            this._toast("Impossibile preparare l'eliminazione");
+            return null;
+        }
+        return this._closed ? null : targets;
+    }
+
+    // Shared by all three operations: confirm with the list of paths, run
+    // `trash()` and map errors. Returns the store result, or null when
+    // cancelled / failed / refused because something became active.
+    async _confirmAndTrash({targets, heading, body, trash, activeMessage}) {
         // heading/body are plain text unless *_use_markup is set: no escaping.
-        const dialog = new Adw.AlertDialog({
-            heading: `Eliminare «${session.title ?? 'Senza titolo'}»?`,
-            body: 'Verranno spostati nel cestino:',
-        });
+        const dialog = new Adw.AlertDialog({heading, body});
         dialog.set_extra_child(this._buildTargetsList(targets));
         dialog.add_response('cancel', 'Annulla');
         dialog.add_response('delete', 'Elimina');
@@ -251,9 +559,24 @@ class SessionsPage {
 
         const response = await dialog.choose(this._window, null);
         if (response !== 'delete' || this._closed)
-            return;
+            return null;
 
-        await this._trash(session);
+        try {
+            // Not cancellable: a reload must not interrupt a half-done trash.
+            return await trash();
+        } catch (e) {
+            if (this._closed)
+                return null;
+            if (e.code === 'active') {
+                this._toast(activeMessage);
+                this._applySelectionMode(false);
+                this.reload();
+            } else {
+                console.debug(`claude-meter: trash failed: ${e.message}`);
+                this._toast('Eliminazione non riuscita');
+            }
+            return null;
+        }
     }
 
     _buildTargetsList(targets) {
@@ -278,10 +601,14 @@ class SessionsPage {
             max_content_height: 200,
         }));
 
-        if (targets.some(t => t.kind === 'project-dir')) {
+        const projects = targets.filter(t => t.kind === 'project-dir').length;
+        if (projects > 0) {
             box.append(new Gtk.Label({
-                label: "È l'ultima conversazione del progetto: verrà eliminata anche " +
-                    'la cartella con la memoria di Claude (memory/)',
+                label: projects === 1
+                    ? "Verrà eliminata l'intera cartella del progetto in ~/.claude, compresa la " +
+                        'memoria di Claude (memory/)'
+                    : `Verranno eliminate le cartelle di ${projects} progetti in ~/.claude, comprese ` +
+                        'le memorie di Claude (memory/)',
                 xalign: 0,
                 wrap: true,
                 max_width_chars: 50,
@@ -291,51 +618,24 @@ class SessionsPage {
         return box;
     }
 
-    async _trash(session) {
-        let result;
-        try {
-            // Not cancellable: a reload must not interrupt a half-done trash.
-            result = await this._store.trash(session, null);
-        } catch (e) {
-            if (this._closed)
-                return;
-            if (e.code === 'active') {
-                this._toast('La conversazione è in corso: non può essere eliminata');
-                this.reload();
-            } else {
-                console.debug(`claude-meter: trash failed: ${e.message}`);
-                this._toast('Eliminazione non riuscita');
-            }
-            return;
-        }
-        if (this._closed)
-            return;
-
-        const failed = result.failed.length;
-        if (failed === 0) {
-            this._removeRow(session);
-            this._toast('Spostata nel cestino');
-        } else if (result.trashed.length === 0) {
-            this._toast('Eliminazione non riuscita');
-        } else {
-            this._toast(failed === 1 ? '1 elemento non eliminato' : `${failed} elementi non eliminati`);
-            this.reload();
-        }
-    }
-
     _removeRow(session) {
         const entry = this._rows.get(session);
         if (!entry)
             return;
         this._rows.delete(session);
+        this._selected.delete(session);
         entry.group.remove(entry.row);
-        entry.projectSessions.splice(entry.projectSessions.indexOf(session), 1);
+        const idx = entry.projectSessions.indexOf(session);
+        if (idx >= 0)
+            entry.projectSessions.splice(idx, 1);
         if (entry.projectSessions.length === 0) {
             this.page.remove(entry.group);
+            this._groups.delete(entry.group);
             this._projectGroups.splice(this._projectGroups.indexOf(entry.group), 1);
         }
         if (this._rows.size === 0)
             this._showEmpty();
+        this._syncSelectionUi();
     }
 }
 
