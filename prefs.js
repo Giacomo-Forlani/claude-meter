@@ -43,13 +43,14 @@ function groupByProject(sessions) {
 }
 
 // The "Conversazioni" page: list of conversations grouped by project, with
-// move-to-trash support (single, multi-selection, whole project). `store` is a
-// SessionStore (or a compatible fake).
+// move-to-trash support. Deletion is always "select, then Elimina (N)": the
+// row / group checkboxes are invisible (opacity 0, space kept) until hovered
+// or focused; checking one enters deletion mode. `store` is a SessionStore (or
+// a compatible fake).
 //
 // Action bar: Adw.PreferencesPage has no bottom bar and Adw.PreferencesWindow
 // only accepts PreferencesPage children (no ToolbarView around one page), so
-// the selection actions live in the header of the first group, in place of
-// the "Seleziona" button.
+// the deletion actions live in the header of the first group, next to reload.
 class SessionsPage {
     constructor(window, store) {
         this._window = window;
@@ -63,8 +64,8 @@ class SessionsPage {
         this._selected = new Set();
         this._escController = null;
         this._projectGroups = [];
-        this._groups = new Map(); // group -> {sessions, check, trashButton}
-        this._rows = new Map(); // session -> {row, group, projectSessions, check}
+        this._groups = new Map(); // group -> {sessions, check, hover}
+        this._rows = new Map(); // session -> {row, group, projectSessions, check, hover}
         this._statusWidget = null;
 
         this.page = new Adw.PreferencesPage({
@@ -80,16 +81,16 @@ class SessionsPage {
         });
         this._headBox = new Gtk.Box({orientation: Gtk.Orientation.HORIZONTAL, spacing: 6, valign: Gtk.Align.CENTER});
 
-        this._selectButton = new Gtk.Button({
-            label: 'Seleziona',
-            tooltip_text: 'Seleziona più conversazioni da eliminare',
+        this._trashModeButton = new Gtk.Button({
+            icon_name: 'user-trash-symbolic',
+            tooltip_text: 'Elimina conversazioni',
             valign: Gtk.Align.CENTER,
             css_classes: ['flat'],
         });
-        this._selectButton.connect('clicked', () => this._setSelectionMode(true));
+        this._trashModeButton.connect('clicked', () => this._setSelectionMode(true));
 
         this._deleteSelectedButton = new Gtk.Button({
-            label: 'Elimina selezionate (0)',
+            label: 'Elimina (0)',
             sensitive: false,
             visible: false,
             valign: Gtk.Align.CENTER,
@@ -112,7 +113,7 @@ class SessionsPage {
         });
         this._reloadButton.connect('clicked', () => this.reload());
 
-        for (const w of [this._selectButton, this._deleteSelectedButton, this._cancelSelectButton, this._reloadButton])
+        for (const w of [this._trashModeButton, this._deleteSelectedButton, this._cancelSelectButton, this._reloadButton])
             this._headBox.append(w);
         this._headGroup.set_header_suffix(this._headBox);
         this.page.add(this._headGroup);
@@ -216,13 +217,11 @@ class SessionsPage {
         this._selectionMode = on;
         this._selected.clear();
         for (const [session, entry] of this._rows) {
-            entry.check.visible = on;
-            entry.trashButton.visible = !on;
+            this._updateCheckVisibility(entry);
             entry.row.activatable_widget = on && !session.active ? entry.check : null;
         }
         for (const info of this._groups.values()) {
-            info.check.visible = on;
-            info.trashButton.visible = !on;
+            this._updateCheckVisibility(info);
         }
         if (on)
             this._addEscController();
@@ -265,6 +264,9 @@ class SessionsPage {
                 const count = eligible.filter(s => this._selected.has(s)).length;
                 const all = eligible.length > 0 && count === eligible.length;
                 info.check.sensitive = eligible.length > 0;
+                info.check.tooltip_text = eligible.length > 0
+                    ? 'Seleziona tutte le conversazioni del progetto'
+                    : 'Tutte le conversazioni sono in corso';
                 info.check.inconsistent = count > 0 && !all;
                 info.check.active = all;
             }
@@ -273,10 +275,10 @@ class SessionsPage {
         }
         const n = this._selected.size;
         const on = this._selectionMode;
-        this._selectButton.visible = !on;
+        this._trashModeButton.visible = !on;
         this._deleteSelectedButton.visible = on;
         this._cancelSelectButton.visible = on;
-        this._deleteSelectedButton.label = `Elimina selezionate (${n})`;
+        this._deleteSelectedButton.label = `Elimina (${n})`;
         this._deleteSelectedButton.sensitive = n > 0;
     }
 
@@ -303,7 +305,7 @@ class SessionsPage {
                 title: GLib.markup_escape_text(projectPath ? tildify(projectPath) : '—', -1),
                 sensitive: !this._busy,
             });
-            this._addGroupHeader(group, projectSessions, projectPath);
+            this._addGroupHeader(group, projectSessions);
             this.page.add(group);
             this._projectGroups.push(group);
             for (const session of projectSessions)
@@ -312,44 +314,54 @@ class SessionsPage {
         this._syncSelectionUi();
     }
 
-    _addGroupHeader(group, projectSessions, projectPath) {
-        const box = new Gtk.Box({orientation: Gtk.Orientation.HORIZONTAL, spacing: 6, valign: Gtk.Align.CENTER});
+    // Checkboxes stay in the layout (opacity 0) and show up on hover, keyboard
+    // focus, or while the deletion mode is on.
+    _updateCheckVisibility(entry) {
+        const show = this._selectionMode || entry.hover || entry.check.has_focus;
+        entry.check.opacity = show ? 1 : 0;
+    }
 
+    // Wire hover (on `hoverWidget`) and focus (on the checkbox) visibility.
+    _trackVisibility(entry, hoverWidget) {
+        entry.hover = false;
+        const motion = new Gtk.EventControllerMotion();
+        motion.connect('enter', () => {
+            entry.hover = true;
+            this._updateCheckVisibility(entry);
+        });
+        motion.connect('leave', () => {
+            entry.hover = false;
+            this._updateCheckVisibility(entry);
+        });
+        hoverWidget.add_controller(motion);
+        entry.check.connect('notify::has-focus', () => this._updateCheckVisibility(entry));
+        this._updateCheckVisibility(entry);
+    }
+
+    _addGroupHeader(group, projectSessions) {
         const check = new Gtk.CheckButton({
             tooltip_text: 'Seleziona tutte le conversazioni del progetto',
             valign: Gtk.Align.CENTER,
-            visible: this._selectionMode,
         });
+        const info = {sessions: projectSessions, check, hover: false};
         check.connect('toggled', () => {
             if (this._syncing)
                 return;
+            const checked = check.active;
+            if (checked && !this._selectionMode)
+                this._applySelectionMode(true);
             for (const s of projectSessions.filter(s => !s.active)) {
-                if (check.active)
+                if (checked)
                     this._selected.add(s);
                 else
                     this._selected.delete(s);
             }
             this._syncSelectionUi();
         });
-
-        const trashButton = new Gtk.Button({
-            icon_name: 'user-trash-symbolic',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-            visible: !this._selectionMode,
-        });
-        if (projectSessions.some(s => s.active)) {
-            trashButton.sensitive = false;
-            trashButton.tooltip_text = 'Il progetto ha una conversazione in corso: non può essere eliminato';
-        } else {
-            trashButton.tooltip_text = 'Elimina i dati del progetto';
-            trashButton.connect('clicked', () => this._onTrashProject(projectSessions, projectPath));
-        }
-
-        box.append(check);
-        box.append(trashButton);
-        group.set_header_suffix(box);
-        this._groups.set(group, {sessions: projectSessions, check, trashButton});
+        group.set_header_suffix(check);
+        this._groups.set(group, info);
+        // Hover over the whole header (the suffix's parent), not just the checkbox.
+        this._trackVisibility(info, check.get_parent() ?? check);
     }
 
     _addRow(group, session, projectSessions) {
@@ -363,43 +375,37 @@ class SessionsPage {
 
         const check = new Gtk.CheckButton({
             valign: Gtk.Align.CENTER,
-            visible: this._selectionMode,
             sensitive: !session.active,
         });
+        if (session.active)
+            check.tooltip_text = 'Conversazione in corso: non può essere eliminata';
         check.connect('toggled', () => {
             if (this._syncing)
                 return;
-            if (check.active)
+            const checked = check.active;
+            if (checked && !this._selectionMode)
+                this._applySelectionMode(true);
+            if (checked)
                 this._selected.add(session);
             else
                 this._selected.delete(session);
             this._syncSelectionUi();
         });
-        row.add_prefix(check);
 
-        const button = new Gtk.Button({
-            icon_name: 'user-trash-symbolic',
-            valign: Gtk.Align.CENTER,
-            css_classes: ['flat'],
-            visible: !this._selectionMode,
-        });
         if (session.active) {
             row.add_suffix(new Gtk.Label({
                 label: 'In corso',
                 valign: Gtk.Align.CENTER,
                 css_classes: ['dim-label'],
             }));
-            button.sensitive = false;
-            button.tooltip_text = 'Una conversazione in corso non può essere eliminata';
-        } else {
-            button.tooltip_text = 'Sposta nel cestino';
-            button.connect('clicked', () => this._onTrash(session));
         }
-        row.add_suffix(button);
+        row.add_suffix(check);
         if (this._selectionMode && !session.active)
             row.activatable_widget = check;
         group.add(row);
-        this._rows.set(session, {row, group, projectSessions, check, trashButton: button});
+        const entry = {row, group, projectSessions, check, hover: false};
+        this._rows.set(session, entry);
+        this._trackVisibility(entry, row);
     }
 
     _toast(title) {
@@ -407,35 +413,7 @@ class SessionsPage {
             this._window.add_toast(new Adw.Toast({title}));
     }
 
-    // ---- operations: single / selection / project ----
-
-    async _onTrash(session) {
-        if (this._busy)
-            return;
-        this._setBusy(true);
-        try {
-            const targets = await this._prepare(() => this._store.getDeletionTargets(session, this._cancellable));
-            if (!targets)
-                return;
-            const result = await this._confirmAndTrash({
-                targets,
-                heading: `Eliminare «${session.title ?? 'Senza titolo'}»?`,
-                body: 'Verranno spostati nel cestino:',
-                trash: () => this._store.trash(session, null),
-                activeMessage: 'La conversazione è in corso: non può essere eliminata',
-            });
-            if (!result)
-                return;
-            if (result.failed.length === 0) {
-                this._removeRow(session);
-                this._toast('Spostata nel cestino');
-            } else {
-                this._reportPartial(result);
-            }
-        } finally {
-            this._setBusy(false);
-        }
-    }
+    // ---- operations ----
 
     async _onTrashSelected() {
         if (this._busy || this._selected.size === 0)
@@ -483,52 +461,6 @@ class SessionsPage {
         }
     }
 
-    async _onTrashProject(projectSessions, projectPath) {
-        if (this._busy || projectSessions.length === 0)
-            return;
-        const projectDir = projectSessions[0].projectDir;
-        const sessions = [...projectSessions];
-        this._setBusy(true);
-        try {
-            const targets = await this._prepare(() => this._store.getProjectDeletionTargets(projectDir, this._cancellable));
-            if (!targets)
-                return;
-            const n = sessions.length;
-            const result = await this._confirmAndTrash({
-                targets,
-                heading: `Eliminare i dati del progetto «${projectPath ? tildify(projectPath) : '—'}»?`,
-                body: `${n === 1 ? '1 conversazione' : `${n} conversazioni`} e la memoria di Claude su questo ` +
-                    'progetto verranno spostate nel cestino. La cartella del progetto con il codice ' +
-                    'sorgente non viene toccata.',
-                trash: () => this._store.trashProject(projectDir, null),
-                activeMessage: 'Il progetto ha una conversazione in corso: non può essere eliminato',
-            });
-            if (!result)
-                return;
-            if (result.failed.length === 0) {
-                for (const s of sessions)
-                    this._removeRow(s);
-                this._toast('Dati del progetto spostati nel cestino');
-            } else {
-                this._reportPartial(result);
-            }
-        } finally {
-            this._setBusy(false);
-        }
-    }
-
-    // Toast + reload for an operation that left something behind.
-    _reportPartial(result) {
-        const failed = result.failed.length;
-        if (result.trashed.length === 0) {
-            this._toast('Eliminazione non riuscita');
-            return;
-        }
-        this._toast(failed === 1 ? '1 elemento non eliminato' : `${failed} elementi non eliminati`);
-        this._applySelectionMode(false);
-        this.reload();
-    }
-
     // Compute the deletion targets; null (with a toast) on failure/close.
     async _prepare(compute) {
         let targets;
@@ -544,7 +476,7 @@ class SessionsPage {
         return this._closed ? null : targets;
     }
 
-    // Shared by all three operations: confirm with the list of paths, run
+    // Confirm with the list of paths, run
     // `trash()` and map errors. Returns the store result, or null when
     // cancelled / failed / refused because something became active.
     async _confirmAndTrash({targets, heading, body, trash, activeMessage}) {
