@@ -83,6 +83,13 @@ export class SessionStore {
     async getDeletionTargets(session, cancellable = null) // -> Promise<Target[]>, only existing paths
     async trash(session, cancellable = null)  // -> Promise<{ trashed: string[], failed: [{path, message}] }>
                                               // throws Error with .code === 'active' (nothing trashed)
+    async getDeletionTargetsFor(sessions, cancellable = null) // -> Promise<Target[]>, rule evaluated on the set
+    async trashMany(sessions, cancellable = null)
+        // -> Promise<{ trashed: string[], failed: [{path, message}], skippedActive: Session[] }>
+        // invalid session -> throws, nothing trashed; active ones skipped, the rest trashed
+    async getProjectDeletionTargets(projectDir, cancellable = null) // -> Promise<Target[]>
+    async trashProject(projectDir, cancellable = null) // -> Promise<{ trashed, failed }>
+                                              // throws Error with .code === 'active' (nothing trashed)
     async _trashPath(path, cancellable)       // the only call to Gio trash_async; tests override it
 }
 // Session = { sessionId: string, title: string|null, projectPath: string|null,
@@ -91,7 +98,9 @@ export class SessionStore {
 // Target  = { path: string, kind: 'conversation' | 'session-dir' | 'file-history'
 //                               | 'session-env' | 'todos' | 'project-dir' }
 ```
-Pure module (Gio/GLib only). A conversation is a first-level `projects/<project>/<sessionId>.jsonl`. Title = last `custom-title`/`ai-title` record, else first real user message (slash-command wrappers skipped), else `null`. Active = `sessionId` listed in `~/.claude/sessions/<pid>.json` with a live `/proc/<pid>`, or file modified in the last 5 minutes. Linked data: `projects/<project>/<sessionId>/`, `file-history/<sessionId>/`, `session-env/<sessionId>/`, `todos/<sessionId>*`. When the project directory would be left empty or with only `memory/`, the single `project-dir` target replaces `conversation` and `session-dir`. Deletion is always a move to the system trash; `history.jsonl`, `shell-snapshots/`, `paste-cache/`, `telemetry/`, `jobs/`, `daemon/` are never touched. Tests must never call the real `trash_async`.
+Pure module (Gio/GLib only). A conversation is a first-level `projects/<project>/<sessionId>.jsonl`. Title = last `custom-title`/`ai-title` record, else first real user message (slash-command wrappers skipped), else `null`. Active = `sessionId` listed in `~/.claude/sessions/<pid>.json` with a live `/proc/<pid>` (file mtime is not considered). Linked data: `projects/<project>/<sessionId>/`, `file-history/<sessionId>/`, `session-env/<sessionId>/`, `todos/<sessionId>*`. When the project directory would be left empty or with only `memory/`, the single `project-dir` target replaces `conversation` and `session-dir`; for several sessions this rule is evaluated on the whole set per project (one shared helper, also used by `getDeletionTargets`), so selecting every conversation of a project yields one `project-dir`. `trashMany` re-checks activity and recomputes targets on the non-active ones, so a skipped conversation keeps its project dir. `projectDir` for the project methods must be a direct child of `projects/` (as in `Session.projectDir`); the dir is re-read at call time (session ids = first-level `*.jsonl` names) and the targets are `project-dir` (everything, incl. `memory/`) + linked data of every session; `trashProject` refuses the whole project if any session is active.
+
+Preferences "Conversazioni" page (`SessionsPage` in `prefs.js`): one `Adw.PreferencesGroup` per project, one row per conversation with its trash button. Each group header has a project trash button ("Elimina i dati del progetto", disabled with tooltip if a conversation is active). "Seleziona" (first group header) enters selection mode: row checkboxes (disabled for active rows; clicking a row toggles it), a tri-state "seleziona tutte" per group, and "Elimina selezionate (N)" / "Annulla" in place of "Seleziona" (`Adw.PreferencesWindow` accepts only `PreferencesPage` children, so no bottom action bar). Esc leaves the mode (capture-phase key controller, present only while the mode is on). Single, selection and project deletion all go through `_confirmAndTrash` (one `Adw.AlertDialog` listing the target paths, memory/ warning when a `project-dir` is involved); page controls are insensitive while an operation runs; the selection is cleared on exit, reload or after a deletion. Deletion is always a move to the system trash; `history.jsonl`, `shell-snapshots/`, `paste-cache/`, `telemetry/`, `jobs/`, `daemon/` are never touched. Tests must never call the real `trash_async`.
 
 ### lib/indicator.js
 ```js
