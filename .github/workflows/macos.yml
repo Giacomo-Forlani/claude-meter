@@ -4,13 +4,18 @@ on:
     branches: [main]
     paths: ['macos/**', '.github/workflows/macos.yml']
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Verifica su Intel e pubblica la versione indicata in Info.plist"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: ${{ inputs.publish && 'macos-15-intel' || 'macos-15' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -40,3 +45,25 @@ jobs:
           name: Claude-Meter-macOS
           path: dist/macos/*
           if-no-files-found: error
+
+  release:
+    if: ${{ inputs.publish && github.ref == 'refs/heads/main' }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Claude-Meter-macOS
+          path: dist/macos
+      - name: Pubblica il pacchetto verificato
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist/macos
+          sha256sum -c SHA256SUMS.txt
+          version=$(python3 -c 'import plistlib; print(plistlib.load(open("../../macos/Info.plist","rb"))["CFBundleShortVersionString"])')
+          gh release create "macos-v$version" Claude-Meter-macOS.zip SHA256SUMS.txt \
+            --target "$GITHUB_SHA" --title "Claude Meter $version per macOS" --notes-file ../../macos/ReleaseNotes.md
