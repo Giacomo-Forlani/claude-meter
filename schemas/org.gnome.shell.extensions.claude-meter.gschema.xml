@@ -55,6 +55,15 @@
       <summary>Granchi</summary>
       <description>'per-session': un granchio per sessione Claude Code aperta; 'max': al massimo crab-max granchi; 'off': nessun granchio.</description>
     </key>
+    <key name="panel-empty" type="s">
+      <choices>
+        <choice value="crab"/>
+        <choice value="icon"/>
+      </choices>
+      <default>'crab'</default>
+      <summary>Senza sessioni aperte</summary>
+      <description>'crab': un granchio che dorme accanto ai cerchi; 'icon': l'icona dell'estensione.</description>
+    </key>
     <key name="crab-max" type="u">
       <default>3</default>
       <range min="1" max="20"/>
@@ -62,7 +71,7 @@
       <description>Usato quando crab-mode è 'max'.</description>
     </key>
     <key name="panel-max-width" type="u">
-      <default>100</default>
+      <default>170</default>
       <range min="40" max="400"/>
       <summary>Larghezza massima nella barra superiore</summary>
       <description>Larghezza massima in pixel di cerchi e granchi insieme.</description>

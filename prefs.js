@@ -663,8 +663,27 @@ export default class ClaudeMeterPrefs extends ExtensionPreferences {
                 settings.set_string('crab-mode', mode);
         });
         const crabChangedId = settings.connect('changed::crab-mode', syncCrabRow);
+
+        const emptyModes = ['crab', 'icon'];
+        const emptyRow = new Adw.ComboRow({
+            title: 'Senza sessioni aperte',
+            model: Gtk.StringList.new(['Granchio che dorme', 'Icona']),
+        });
+        panelGroup.add(emptyRow);
+        const syncEmptyRow = () => {
+            const index = emptyModes.indexOf(settings.get_string('panel-empty'));
+            emptyRow.selected = index < 0 ? 0 : index;
+        };
+        syncEmptyRow();
+        emptyRow.connect('notify::selected', () => {
+            const mode = emptyModes[emptyRow.selected] ?? 'crab';
+            if (settings.get_string('panel-empty') !== mode)
+                settings.set_string('panel-empty', mode);
+        });
+        const emptyChangedId = settings.connect('changed::panel-empty', syncEmptyRow);
         window.connect('close-request', () => {
             settings.disconnect(crabChangedId);
+            settings.disconnect(emptyChangedId);
             return false;
         });
 

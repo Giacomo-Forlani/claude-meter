@@ -1,156 +1,98 @@
-# Animazioni dei granchi
+# Animazioni dei granchi (Clawd)
 
-Ogni sessione aperta di Claude Code compare nella barra in alto come un granchio in pixel art.
-Le animazioni sono **dati scritti a mano** in `lib/sprites.js`: per modificarle non serve toccare il codice.
+Ogni sessione aperta di Claude Code compare nella barra in alto come un Clawd in pixel art,
+in una posizione fissa: la sessione più vecchia a sinistra, le nuove si aggiungono a destra,
+poi gli anelli di utilizzo. Le animazioni nascono da **spritesheet PNG** in `clawd-animation/`
+e vengono convertite in dati JS da uno script: a runtime non si legge nessuna immagine.
+`clawd-animation/` è **solo per lo sviluppo** ed è in `.gitignore`: chi installa l'estensione usa
+il `lib/sprites.js` già generato e versionato. Dopo aver cambiato gli sheet, rigenera e committa `lib/sprites.js`.
 
-## Come vengono lette
+## Flusso
 
-1. `lib/sprites.js` esporta un solo oggetto, `ANIMATIONS`: nome animazione → definizione.
-2. `lib/crabs.js` lo importa e, al caricamento dell'estensione, lo **compila** una volta sola
-   (`compileAnimations()`): ogni frame diventa tre liste di pixel `[colonna, riga]`
-   (corpo, corpo scuro, occhi). Niente lettura di file a runtime.
-3. Ad ogni tick (8 al secondo) `CrabFlock` sceglie per ogni granchio animazione e frame;
-   `lib/indicator.js` disegna ogni pixel come un quadrato di `PIXEL` px (default 2),
-   e ridisegna solo quando un granchio cambia frame o posizione.
-
-Se i dati sono sbagliati (carattere sconosciuto, `idle` mancante, animazione senza frame)
-(o un array `every` di lunghezza diversa dai frame)
-la compilazione lancia un errore che dice animazione, frame e riga: l'estensione non parte,
-quindi verifica sempre con il test (vedi sotto) prima di installare.
-
-## Formato di un frame
-
-Un frame è un array di stringhe, **una stringa per riga**, dall'alto verso il basso.
-Ogni carattere è un pixel:
-
-| Carattere | Significato |
-|---|---|
-| `B` | corpo, colore della sessione (tonalità di arancio, fissa per sessione) |
-| `b` | corpo scuro: colore della sessione × `DARK_FACTOR` (0.7, in `lib/crabs.js`) |
-| `E` | occhi, neri (`EYE_COLOR` in `lib/crabs.js`) |
-| `.` o spazio | trasparente |
-
-Qualsiasi altro carattere è un errore. Le maiuscole contano (`B` ≠ `b`).
-
-### Griglia
-
-- La griglia è **grande quanto il frame più grande** fra tutte le animazioni
-  (larghezza = riga più lunga, altezza = frame con più righe). Oggi è 15×11:
-  il granchio in piedi occupa le righe 2–10, le righe 0–1 sono spazio per salti e chele alzate,
-  e la riga 10 è il "terreno" (le zampe appoggiate finiscono lì).
-- I frame più piccoli vengono **allineati in basso e centrati** orizzontalmente.
-- Le righe di uno stesso frame possono avere lunghezze diverse, ma conviene tenerle uguali e
-  usare `.` per riempire: si vede meglio la forma.
-- Un salto si disegna spostando il granchio verso l'alto dentro la griglia
-  (vedi `dance` e `hop`); un granchio accucciato si sposta in basso con le zampe divaricate
-  (vedi `idle` e `dig`).
-- Più è grande la griglia, più è alto il granchio nella barra (`altezza × PIXEL` px) e più
-  spazio orizzontale occupa: con griglie molto larghe ne entrano meno in `panel-max-width`.
-
-## Campi di un'animazione
-
-```js
-nome: {
-    frames: [[ /* frame 1 */ ], [ /* frame 2 */ ]],  // obbligatorio, almeno 1
-    every: 1,          // tick per frame (8 tick = 1 s). 2 = ogni frame dura 1/4 s.
-                       // Oppure un numero per frame: [14, 2] = 14 tick il primo, 2 il secondo
-    weight: 1,         // probabilità relativa di essere scelta (anche decimale); 0 = mai
-    move: false,       // true = il granchio si sposta di lato (1 px per tick) mentre la esegue
-    flip: false,       // true = frame disegnati verso destra, specchiati quando va a sinistra
-    seconds: [2, 5],   // durata (secondi, min/max casuale) di ogni esecuzione
-},
+```
+clawd-animation/*.png  +  clawd-animation/animations.json
+        │  gjs -m tools/build-animations.js   (solo lo sviluppatore, a mano)
+        ▼
+lib/sprites.js   (GENERATO e versionato, non modificare a mano)
+        │  compilato una volta al caricamento da lib/crabs.js
+        ▼
+lib/indicator.js disegna ogni pixel come un quadrato di PIXEL px (2) con cairo
 ```
 
-Tutti i campi tranne `frames` sono facoltativi; i valori sopra sono i default.
-I frame girano in loop finché dura l'animazione, poi il granchio ne sceglie un'altra
-(può ripetere la stessa). Un `every` per frame serve per pose lunghe e scatti brevi,
-per esempio occhi aperti a lungo e un battito di palpebre di 2 tick (vedi `pause`),
-senza dover ripetere frame identici.
+`clawd-animation/generate.py` (Python + PIL) è il sorgente da cui sono nati gli sheet attuali:
+si può usare per rigenerarli, oppure si possono disegnare gli PNG con qualsiasi editor.
 
-Con `flip: true` disegna il granchio rivolto a destra (occhi spostati a destra, zampe che
-avanzano verso destra): quando cammina verso sinistra il frame viene specchiato. Il verso è
-l'ultima direzione di marcia, quindi vale anche per animazioni senza `move` (vedi `wave`).
+## Spritesheet
 
-## Animazioni speciali e casuali
+- Una striscia orizzontale per animazione, frame affiancati da sinistra a destra.
+- Frame **quadrati**: la larghezza del frame è l'altezza dello sheet (oggi 16×16).
+  Per frame non quadrati aggiungi `frameWidth` all'animazione nel manifest.
+- Tutti gli sheet devono avere la stessa altezza e la stessa larghezza di frame.
+- Pixel con alpha 0 = trasparenti. Gli altri colori vengono usati così come sono
+  (anche semitrasparenti), senza ricolorazione per sessione.
+- Lo script ritaglia le righe/colonne vuote **in tutti i frame di tutte le animazioni**
+  (oggi resta 16×15 → 32×30 px nella barra) e costruisce una palette unica (max 62 colori).
 
-- **`idle` è obbligatoria**: è il granchio di una sessione che non sta lavorando
-  (disegnato semitrasparente). Non viene mai scelta a caso, e `weight`, `move`, `seconds` sono ignorati.
-  Con **un solo frame** è statica e non consuma nulla; con più frame il timer a 8 fps resta
-  acceso anche quando nessuna sessione lavora (ma ridisegna solo al cambio frame).
-- **Tutte le altre** sono comportamenti casuali dei granchi di sessioni al lavoro, estratti in
-  base a `weight`. Il nome è libero (lettere, numeri, `_`).
+## Manifest `clawd-animation/animations.json`
 
-Animazioni attuali:
+```json
+{
+  "fps": 8,
+  "animations": {
+    "idle":       {"file": "idle.png",       "loop": true},
+    "laptop_out": {"file": "laptop_out.png", "loop": false},
+    "work_A":     {"file": "work_A.png",     "loop": true},
+    "work_B":     {"file": "work_B.png",     "loop": true},
+    "success":    {"file": "success.png",    "loop": true, "seconds": 2}
+  },
+  "states": {"sleep": "idle", "start": "laptop_out", "work": ["work_A", "work_B"], "done": "success"}
+}
+```
 
-| Nome | Cosa fa | Note |
-|---|---|---|
-| `idle` | accucciato, occhi chiusi, respira (2 frame da 1,5 s) | sessione ferma |
-| `pause` | fermo: sbatte le palpebre, guarda a sinistra e a destra | `every` per frame |
-| `walk` | cammina di lato, zampe a coppie alterne, chele che dondolano | peso 3, `move`, `flip` |
-| `dance` | saltella alzando una chela alla volta | |
-| `claws` | alza le chele e le apre/chiude | |
-| `wave` | saluta con una chela | `flip`, peso 0.7 |
-| `hop` | si accuccia, salta, atterra | peso 0.7 |
-| `dig` | accucciato, spala con le chele a turno | peso 0.7 |
+| Campo | Significato |
+|---|---|
+| `fps` | frame al secondo di tutte le animazioni |
+| `file` | PNG dentro `clawd-animation/` |
+| `loop` | `true` = gira in loop; `false` = eseguita una volta sola (tutti i frame) |
+| `seconds` | solo con `loop: true`: dopo quanti secondi l'animazione finisce (usato per `done`) |
+| `frameWidth` | facoltativo, larghezza di un frame (default: altezza dello sheet) |
+
+`states` collega le animazioni agli stati della sessione:
+
+| Stato | Quando |
+|---|---|
+| `sleep` | sessione aperta ma ferma (loop) |
+| `start` | passaggio ferma → al lavoro: eseguita una volta, poi `work` |
+| `work` | sessione al lavoro (loop). Lista: ogni sessione ne sceglie una a caso alla creazione e la tiene |
+| `done` | passaggio al lavoro → ferma: per `seconds`, poi `sleep` |
+
+Senza sessioni aperte (o con i granchi su off), con la preferenza "Senza sessioni aperte" =
+"Granchio che dorme" (`panel-empty` = `crab`), resta un granchio in `sleep` accanto ai cerchi:
+alla prima sessione aperta diventa il suo granchio (se è già al lavoro fa `start` e poi `work`),
+e quando si chiude l'ultima il granchio rimasto torna a fare da segnaposto (`done` e poi `sleep`
+se stava lavorando).
+
+Le transizioni (`start`, `done`) arrivano sempre alla fine; alla fine si guarda lo stato attuale
+(es. se la sessione è già tornata ferma durante `start`, segue `done`). Un granchio di una sessione
+appena comparsa (o all'avvio dell'estensione) parte direttamente da `sleep` o `work`.
 
 ## Operazioni
 
-**Modificare** un'animazione: cambia i caratteri dei suoi frame o i suoi campi.
-
-**Aggiungere** un'animazione: aggiungi una nuova chiave in `ANIMATIONS`, per esempio
-
-```js
-stretch: {
-    every: [6, 4],
-    seconds: [1, 3],
-    frames: [[
-        '...............',
-        '...............',
-        '.b..BBBBBBB..b.',
-        'b..BBBBBBBBB..b',
-        'B..BBEBBBEBB..B',
-        '.B.BBEBBBEBB.B.',
-        '..BBBBBBBBBBB..',
-        '...BBBBBBBBB...',
-        '...bbbbbbbbb...',
-        '....b.b.b.b....',
-        '....b.b.b.b....',
-    ], [
-        '...............',
-        '...............',
-        '....BBBBBBB....',
-        '...BBBBBBBBB...',
-        '...BBEBBBEBB...',
-        '...BBEBBBEBB...',
-        'bBBBBBBBBBBBBBb',
-        '...BBBBBBBBB...',
-        '...bbbbbbbbb...',
-        '....b.b.b.b....',
-        '....b.b.b.b....',
-    ]],
-},
-```
-
-Entra subito fra i comportamenti casuali. Per renderla rara usa un `weight` basso (es. `0.3`).
-
-**Eliminare** un'animazione: togli la sua chiave. Non si può eliminare `idle`. Per disattivarla
-senza cancellarla metti `weight: 0`. Se restano solo `idle`, anche i granchi al lavoro
-mostrano `idle`.
-
-**Cambiare dimensione**: basta disegnare frame più grandi (o più piccoli); la griglia si adatta,
-e con lei lo spazio per granchio nella barra (`CRAB_SLOT`, `CRAB_MIN_STEP` in `lib/crabs.js`).
-Ricordati di aggiornare il test `griglia 15x11` in `tests/test-sessions.js`.
+- **Modificare** un'animazione: modifica il PNG (o `generate.py` e rilancialo), poi rigenera.
+- **Aggiungere** un'animazione di lavoro: nuovo PNG, nuova voce in `animations`, aggiungi il nome
+  a `states.work`.
+- **Sostituire** un'animazione di stato: cambia il nome in `states`.
+- **Cambiare dimensione**: sheet più grandi/piccoli; griglia e spazio per granchio nella barra si
+  adattano. Aggiorna il test della griglia in `tests/test-crabs.js` e verifica che la barra non si
+  allarghi (la griglia ritagliata × `PIXEL` deve stare nell'altezza del pannello).
 
 ## Verificare e applicare
 
 ```bash
-gjs -m tests/test-sessions.js      # compila gli sprite: errori di formato -> FAIL
+gjs -m tools/build-animations.js   # rigenera lib/sprites.js (errori di formato -> exit 1)
+gjs -m tests/test-crabs.js         # compila gli sprite e prova la macchina a stati
 dev/nested.sh start                # shell GNOME isolata con l'estensione
 dev/nested.sh shot crabs 1000 0 280 32   # screenshot della barra in .dev/crabs.png
 dev/nested.sh stop
 ./install.sh                       # poi, su Wayland, esci e rientra nella sessione
 ```
-
-Il test controlla che ogni frame stia nella griglia, abbia occhi e corpo, che `idle` esista
-e che gli array `every` abbiano un valore per frame.
-Nella shell nested i granchi compaiono solo se hai sessioni di Claude Code aperte.

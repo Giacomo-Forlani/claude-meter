@@ -123,3 +123,9 @@
 .claude-meter-ring {
     -claude-meter-ring-color: -st-accent-color;
 }
+
+.claude-meter-crab-more {
+    font-size: 0.85em;
+    font-weight: 700;
+    text-align: left;
+}
