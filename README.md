@@ -1,5 +1,13 @@
 # Claude Meter
 
+## macOS
+
+Questo fork include un’app nativa per la barra dei menu di macOS 13 e successivi, su Apple Silicon e Intel. Mostra l’utilizzo del piano Claude, gli orari di reset e i token locali degli ultimi sette giorni.
+
+Scarica **Claude-Meter-macOS.zip**, estrai **Claude Meter.app**, spostala in **Applicazioni** e aprila. Dal menu dell’app scegli **Collega Claude Code**. [Release macOS](https://github.com/Giacomo-Forlani/claude-meter/releases/latest) · [Installazione e configurazione](macos/README.md)
+
+## GNOME
+
 Estensione GNOME Shell (Fedora 44, GNOME 50, Wayland) che mostra nella barra superiore una sola icona; il menu contiene:
 
 - vista principale: utilizzo del piano Claude Pro (finestra 5 h, settimanale, eventuali limiti per modello, tempo al reset) ed età del dato;

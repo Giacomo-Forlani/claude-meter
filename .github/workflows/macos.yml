@@ -1,0 +1,42 @@
+name: macOS
+on:
+  push:
+    branches: [main]
+    paths: ['macos/**', '.github/workflows/macos.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test dei dati e delle impostazioni
+        working-directory: macos
+        run: |
+          xcrun swiftc -swift-version 5 -parse-as-library Plan.swift TokenHistory.swift Tests.swift -o "$RUNNER_TEMP/meter-tests"
+          "$RUNNER_TEMP/meter-tests"
+      - name: Compila e verifica l’app universale
+        run: bash macos/build.sh
+      - name: Verifica il pacchetto distribuito
+        working-directory: dist/macos
+        run: |
+          shasum -a 256 -c SHA256SUMS.txt
+          ditto -x -k Claude-Meter-macOS.zip "$RUNNER_TEMP/app"
+          bundle="$RUNNER_TEMP/app/Claude Meter.app"
+          codesign --verify --strict "$bundle"
+          lipo -verify_arch arm64 x86_64 "$bundle/Contents/MacOS/ClaudeMeter"
+          test "$(echo '{}' | "$bundle/Contents/MacOS/ClaudeMeter" --capture)" = Claude
+          "$bundle/Contents/MacOS/ClaudeMeter" &
+          pid=$!
+          sleep 3
+          kill -0 "$pid"
+          kill "$pid"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Claude-Meter-macOS
+          path: dist/macos/*
+          if-no-files-found: error
