@@ -16,7 +16,7 @@ for arch in arm64 x86_64; do
 done
 binary="$bundle/Contents/MacOS/ClaudeMeter"
 lipo -create "$work/ClaudeMeter-arm64" "$work/ClaudeMeter-x86_64" -output "$binary"
-lipo -verify_arch arm64 x86_64 "$binary"
+lipo "$binary" -verify_arch arm64 x86_64
 codesign --force --sign - "$bundle"
 codesign --verify --strict "$bundle"
 ditto -c -k --keepParent "$bundle" "$work/Claude-Meter-macOS.zip"
